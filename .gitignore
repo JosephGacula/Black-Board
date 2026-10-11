@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Black Board
+*.mp4
+*.mov
+*.avi
+*.mkv
+output/
+reports/
