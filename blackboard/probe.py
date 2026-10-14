@@ -2,6 +2,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
+from fractions import Fraction
 
 
 @dataclass
@@ -52,11 +53,76 @@ def run_ffprobe(path):
     except json.JSONDecodeError:
         raise ProbeError("ffprobe returned output that could not be understood.")
 
+def _to_int(value):
+    """Convert ffprobe's string values like "2356052" to int, or None."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value):
+    """Convert ffprobe's string values like "11.578233" to float, or None."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_fps(stream):
+    """Turn "30000/1001" into 29.97. Some files give "0/0", so try both fields."""
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            fps = float(Fraction(stream[key]))
+        except (KeyError, ZeroDivisionError, ValueError):
+            continue
+        if fps > 0:
+            return fps
+    return 0.0
+
+
+def probe(path):
+    data = run_ffprobe(path)
+    streams = data.get("streams", [])
+
+    # 1. Find the real video stream (skip embedded cover art)
+    video = None
+    for s in streams:
+        is_video = s.get("codec_type") == "video"
+        is_cover_art = s.get("disposition", {}).get("attached_pic", 0) == 1
+        if is_video and not is_cover_art:
+            video = s
+            break
+    if video is None:
+        raise ProbeError("No video stream found in this file.")
+
+    # 2. Is there an audio stream?
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+
+    # 3. Duration: prefer the video stream, fall back to the container
+    duration = _to_float(video.get("duration"))
+    if duration is None:
+        duration = _to_float(data.get("format", {}).get("duration"))
+    if duration is None:
+        duration = 0.0
+
+    # 4. Build the result
+    try:
+        return VideoInfo(
+            codec=video["codec_name"],
+            width=video["width"],
+            height=video["height"],
+            fps=_parse_fps(video),
+            duration=duration,
+            has_audio=has_audio,
+            profile=video.get("profile"),
+            bitrate=_to_int(video.get("bit_rate")),
+            frame_count=_to_int(video.get("nb_frames")),
+            pix_fmt=video.get("pix_fmt"),
+            color_space=video.get("color_space"),
+        )
+    except KeyError as e:
+        raise ProbeError(f"The video stream is missing required data: {e}")
     
 if __name__ == "__main__":
-    data = run_ffprobe("samples/test1.mp4")
-    print(data["format"]["duration"])
-    try:
-        run_ffprobe("samples/nope.mp4")
-    except ProbeError as e:
-        print("Caught:", e)
+    print(probe("samples/test1.mp4"))
