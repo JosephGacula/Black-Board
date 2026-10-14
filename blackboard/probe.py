@@ -1,3 +1,5 @@
+import json
+import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,8 +25,38 @@ class VideoInfo:
     def resolution(self) -> str:
         return f"{self.width}x{self.height}"
 
+class ProbeError(Exception):
+    """Raised when a video can't be read."""
+
+
+def run_ffprobe(path):
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-print_format", "json",
+        "-show_format", "-show_streams",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError:
+        raise ProbeError("ffprobe was not found on this computer.")
+
+    if result.returncode != 0:
+        raise ProbeError(f"Could not read this file as a video: {path}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise ProbeError("ffprobe returned output that could not be understood.")
+
+    
 if __name__ == "__main__":
-    info = VideoInfo(codec="h264", width=1920, height=1008,
-                     fps=29.97, duration=11.58, has_audio=True)
-    print(info)
-    print(info.resolution)
+    data = run_ffprobe("samples/test1.mp4")
+    print(data["format"]["duration"])
+    try:
+        run_ffprobe("samples/nope.mp4")
+    except ProbeError as e:
+        print("Caught:", e)
