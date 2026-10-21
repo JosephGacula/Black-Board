@@ -1,19 +1,52 @@
-from PySide6.QtCore import QThread, Signal
+import textwrap
+
+import cv2
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QFormLayout, QSizePolicy,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QSizePolicy,
     QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
+    QSlider, QSpinBox,
 )
 
+from blackboard.decode import read_frame, DecodeError
+from blackboard.explanations import FIELD_HELP
 from blackboard.probe import probe, ProbeError
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
                "Frames", "Bitrate", "Pixel format", "Color space",
                "Keyframes", "Average GOP", "Audio"]
 
+PREVIEW_W, PREVIEW_H = 640, 360
+
 
 def fmt(value, template="{}"):
     """Show 'unknown' for missing values instead of 'None'."""
     return "unknown" if value is None else template.format(value)
+
+
+def last_frame_index(info):
+    """Number of the video's last frame, or None if we can't tell."""
+    if info.frame_count:
+        return info.frame_count - 1
+    if info.duration > 0 and info.fps > 0:
+        return max(int(round(info.duration * info.fps)) - 1, 0)
+    return None
+
+
+def frame_to_qimage(image):
+    """Shrink an OpenCV frame (a B, G, R array) to fit the preview box
+    and turn it into a QImage."""
+    h, w = image.shape[:2]
+    scale = min(PREVIEW_W / w, PREVIEW_H / h, 1.0)
+    if scale < 1.0:
+        image = cv2.resize(
+            image, (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        h, w = image.shape[:2]
+    qimage = QImage(image.data, w, h, image.strides[0], QImage.Format.Format_BGR888)
+    return qimage.copy()   # copy, so the QImage owns its pixels
 
 
 class ProbeThread(QThread):
@@ -37,15 +70,48 @@ class ProbeThread(QThread):
             self.done.emit(info)
 
 
+class FrameThread(QThread):
+    """Reads one frame in the background and turns it into a QImage."""
+    loaded = Signal(str, int, object)   # video path, frame number, QImage
+    failed = Signal(str, int, str)      # video path, frame number, message
+
+    def __init__(self, path, index, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.index = index
+
+    def run(self):
+        try:
+            frame = read_frame(self.path, self.index)
+            image = frame_to_qimage(frame.image)
+        except DecodeError as e:
+            self.failed.emit(self.path, self.index, str(e))
+        except Exception as e:
+            self.failed.emit(self.path, self.index, f"Unexpected error: {e}")
+        else:
+            self.loaded.emit(self.path, self.index, image)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Black Board")
-        self.resize(480, 500)
+        self.resize(1000, 540)
 
         self.probe_thread = None
+        self.frame_thread = None
         self.current_path = ""
+        self.info = None          # the VideoInfo of the open video
+        self.wanted_index = 0     # the frame the user is asking for
+        self.last_requested = -1  # the frame we most recently started loading
 
+        # Wait a moment after the slider stops moving before loading a frame
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setSingleShot(True)
+        self.frame_timer.setInterval(120)
+        self.frame_timer.timeout.connect(self.request_frame)
+
+        # --- Top: open button, file name, progress bar ---
         self.open_button = QPushButton("Open video...")
         self.open_button.clicked.connect(self.choose_file)
 
@@ -60,24 +126,60 @@ class MainWindow(QMainWindow):
         policy.setRetainSizeWhenHidden(True)
         self.progress_bar.setSizePolicy(policy)
 
-        # One label per measurement, filled in after a video is probed
+        # --- Left: one label per measurement ---
         self.fields = {}
         form = QFormLayout()
         for name in FIELD_NAMES:
-            label = QLabel("-")
-            self.fields[name] = label
-            form.addRow(name + ":", label)
+            # Hovering over either the name or the value shows an explanation
+            tip = textwrap.fill(FIELD_HELP[name], width=55)
+            name_label = QLabel(name + ":")
+            name_label.setToolTip(tip)
+            value_label = QLabel("-")
+            value_label.setToolTip(tip)
+            self.fields[name] = value_label
+            form.addRow(name_label, value_label)
+
+        # --- Right: frame preview with slider and number box ---
+        self.preview = QLabel()
+        self.preview.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setStyleSheet("background-color: #111; color: #aaa;")
+
+        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_spin = QSpinBox()
+        # Keep the slider and the number box in step with each other
+        self.frame_slider.valueChanged.connect(self.frame_spin.setValue)
+        self.frame_spin.valueChanged.connect(self.frame_slider.setValue)
+        self.frame_spin.valueChanged.connect(self.on_frame_changed)
+
+        self.frame_info = QLabel("")
+        self.clear_preview()
+
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(self.frame_slider)
+        slider_row.addWidget(self.frame_spin)
+
+        preview_column = QVBoxLayout()
+        preview_column.addWidget(self.preview)
+        preview_column.addLayout(slider_row)
+        preview_column.addWidget(self.frame_info)
+        preview_column.addStretch()
+
+        body = QHBoxLayout()
+        body.addLayout(form)
+        body.addLayout(preview_column)
 
         layout = QVBoxLayout()
         layout.addWidget(self.open_button)
         layout.addWidget(self.file_label)
         layout.addWidget(self.progress_bar)
-        layout.addLayout(form)
-        layout.addStretch()
+        layout.addLayout(body)
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+    # ---------- opening a video and probing it ----------
 
     def choose_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -89,6 +191,7 @@ class MainWindow(QMainWindow):
 
         self.current_path = path
         self.clear_info()
+        self.clear_preview()
         self.file_label.setText(f"Reading {path} ...")
         self.open_button.setEnabled(False)
         self.progress_bar.setRange(0, 100)
@@ -112,6 +215,7 @@ class MainWindow(QMainWindow):
         self.end_probe()
         self.file_label.setText(self.current_path)
         self.show_info(info)
+        self.setup_preview(info)
 
     def on_failed(self, message):
         self.end_probe()
@@ -142,8 +246,86 @@ class MainWindow(QMainWindow):
         f["Average GOP"].setText(fmt(info.avg_gop, "{:.1f} frames"))
         f["Audio"].setText("Yes" if info.has_audio else "No")
 
+    # ---------- the frame preview ----------
+
+    def clear_preview(self):
+        self.info = None
+        self.frame_timer.stop()
+        self.frame_slider.setEnabled(False)
+        self.frame_spin.setEnabled(False)
+        self.preview.clear()
+        self.preview.setText("Open a video to see its frames")
+        self.frame_info.setText("")
+
+    def setup_preview(self, info):
+        last = last_frame_index(info)
+        if last is None:
+            self.preview.setText("Frame preview is not available for this video")
+            return
+
+        self.info = info
+        self.wanted_index = 0
+        self.last_requested = -1
+        # Set the range and go back to frame 0 without triggering a load
+        for widget in (self.frame_slider, self.frame_spin):
+            widget.blockSignals(True)
+            widget.setRange(0, last)
+            widget.setValue(0)
+            widget.blockSignals(False)
+        self.frame_slider.setEnabled(True)
+        self.frame_spin.setEnabled(True)
+        self.update_frame_label(0)
+        self.preview.setText("Loading frame...")
+        self.request_frame()
+
+    def update_frame_label(self, index):
+        seconds = index / self.info.fps if self.info.fps > 0 else 0.0
+        self.frame_info.setText(
+            f"Frame {index} of {self.frame_slider.maximum()}   |   {seconds:.2f} s"
+        )
+
+    def on_frame_changed(self, index):
+        if self.info is None:
+            return
+        self.wanted_index = index
+        self.update_frame_label(index)       # update the text right away
+        self.frame_timer.start()             # load the image once it settles
+
+    def request_frame(self):
+        if self.info is None:
+            return
+        if self.frame_thread is not None and self.frame_thread.isRunning():
+            return   # on_frame_thread_finished will load the latest request
+        self.start_frame_thread()
+
+    def start_frame_thread(self):
+        self.last_requested = self.wanted_index
+        thread = FrameThread(self.current_path, self.wanted_index, self)
+        thread.loaded.connect(self.on_frame_loaded)
+        thread.failed.connect(self.on_frame_failed)
+        thread.finished.connect(self.on_frame_thread_finished)
+        self.frame_thread = thread
+        thread.start()
+
+    def on_frame_thread_finished(self):
+        # If the user moved on while that frame was loading, load the new one
+        if self.info is not None and self.wanted_index != self.last_requested:
+            self.start_frame_thread()
+
+    def on_frame_loaded(self, path, index, image):
+        if path != self.current_path:
+            return   # a late result for a video that is no longer open
+        self.preview.setPixmap(QPixmap.fromImage(image))
+
+    def on_frame_failed(self, path, index, message):
+        if path != self.current_path:
+            return
+        self.preview.clear()
+        self.preview.setText(f"Could not read frame {index}.\n{message}")
+
     def closeEvent(self, event):
-        # Don't close the window while the background thread is still working
-        if self.probe_thread is not None and self.probe_thread.isRunning():
-            self.probe_thread.wait()
+        # Don't close the window while a background thread is still working
+        for thread in self.findChildren(QThread):
+            if thread.isRunning():
+                thread.wait()
         event.accept()
