@@ -1,8 +1,12 @@
 import json
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
 from fractions import Fraction
+from typing import Optional
+
+# On Windows this stops a black console window from flashing up when the
+# packaged (windowed) app runs ffprobe. It does nothing on other systems.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass
@@ -29,6 +33,7 @@ class VideoInfo:
     def resolution(self) -> str:
         return f"{self.width}x{self.height}"
 
+
 class ProbeError(Exception):
     """Raised when a video can't be read."""
 
@@ -44,6 +49,7 @@ def run_ffprobe(path):
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         raise ProbeError("ffprobe was not found on this computer.")
@@ -55,6 +61,7 @@ def run_ffprobe(path):
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         raise ProbeError("ffprobe returned output that could not be understood.")
+
 
 def _to_int(value):
     """Convert ffprobe's string values like "2356052" to int, or None."""
@@ -71,39 +78,6 @@ def _to_float(value):
     except (TypeError, ValueError):
         return None
 
-def get_gop_info(path, stream_index):
-    """Count keyframes and work out GOP length for one video stream.
-
-    Returns (keyframe_count, avg_gop, max_gop), or (None, None, None)
-    if ffprobe can't report it.
-    """
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-select_streams", str(stream_index),
-        "-show_entries", "packet=flags",
-        "-of", "csv=p=0",
-        str(path),
-    ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
-    if result.returncode != 0:
-        return None, None, None
-
-    # One line per frame (packet), e.g. "K__" for a keyframe, "___" otherwise
-    flags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    keyframe_positions = [i for i, f in enumerate(flags) if "K" in f]
-    if not keyframe_positions:
-        return None, None, None
-
-    # GOP lengths: frames from one keyframe up to the next (and to the end)
-    boundaries = keyframe_positions + [len(flags)]
-    gop_lengths = [boundaries[i + 1] - boundaries[i]
-                   for i in range(len(keyframe_positions))]
-
-    avg_gop = sum(gop_lengths) / len(gop_lengths)
-    return len(keyframe_positions), avg_gop, max(gop_lengths)
 
 def _parse_fps(stream):
     """Turn "30000/1001" into 29.97. Some files give "0/0", so try both fields."""
@@ -117,7 +91,68 @@ def _parse_fps(stream):
     return 0.0
 
 
-def probe(path):
+def get_gop_info(path, stream_index, total_frames=None, progress=None):
+    """Count keyframes and work out GOP length for one video stream.
+
+    If total_frames and progress are given, progress(fraction) is called
+    now and then with a number from 0.0 to 1.0.
+
+    Returns (keyframe_count, avg_gop, max_gop), or (None, None, None)
+    if ffprobe can't report it.
+    """
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-select_streams", str(stream_index),
+        "-show_entries", "packet=flags",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+
+    keyframe_positions = []
+    count = 0
+    try:
+        with subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
+        ) as proc:
+            # ffprobe prints one line per frame, e.g. "K__" for a keyframe.
+            # Reading line by line lets us report progress as it goes.
+            for line in proc.stdout:
+                if not line.strip():
+                    continue
+                if "K" in line:
+                    keyframe_positions.append(count)
+                count += 1
+                if progress and total_frames and count % 100 == 0:
+                    progress(min(count / total_frames, 1.0))
+            returncode = proc.wait()
+    except OSError:
+        return None, None, None
+
+    if returncode != 0 or not keyframe_positions:
+        return None, None, None
+
+    # GOP lengths: frames from one keyframe up to the next (and to the end)
+    boundaries = keyframe_positions + [count]
+    gop_lengths = [boundaries[i + 1] - boundaries[i]
+                   for i in range(len(keyframe_positions))]
+
+    avg_gop = sum(gop_lengths) / len(gop_lengths)
+    return len(keyframe_positions), avg_gop, max(gop_lengths)
+
+
+def probe(path, progress=None):
+    """Read a video's properties and return a VideoInfo.
+
+    progress is optional. If given, it is called with a number from 0 to 100
+    as the work proceeds, or with -1 if the amount of work isn't known.
+    """
+    def report(percent):
+        if progress is not None:
+            progress(percent)
+
+    report(0)
     data = run_ffprobe(path)
     streams = data.get("streams", [])
 
@@ -142,12 +177,23 @@ def probe(path):
     if duration is None:
         duration = 0.0
 
-    # 4. Keyframes and GOP length
-    keyframes, avg_gop, max_gop = get_gop_info(path, video.get("index", 0))
+    report(5)
+
+    # 4. Keyframes and GOP length (the slow part)
+    index = video.get("index", 0)
+    total_frames = _to_int(video.get("nb_frames"))
+    if total_frames:
+        keyframes, avg_gop, max_gop = get_gop_info(
+            path, index, total_frames,
+            lambda fraction: report(5 + int(fraction * 94)),
+        )
+    else:
+        report(-1)   # we don't know how much work there is: busy bar
+        keyframes, avg_gop, max_gop = get_gop_info(path, index)
 
     # 5. Build the result
     try:
-        return VideoInfo(
+        info = VideoInfo(
             codec=video["codec_name"],
             width=video["width"],
             height=video["height"],
@@ -165,6 +211,10 @@ def probe(path):
         )
     except KeyError as e:
         raise ProbeError(f"The video stream is missing required data: {e}")
-    
+
+    report(100)
+    return info
+
+
 if __name__ == "__main__":
-    print(probe("samples/test1.mp4"))
+    print(probe("samples/test1.mp4", progress=print))

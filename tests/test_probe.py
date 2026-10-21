@@ -31,6 +31,15 @@ def test_gop_adds_up_to_frame_count():
     assert info.keyframe_count * info.avg_gop == pytest.approx(info.frame_count)
 
 
+@needs_sample
+def test_progress_reports_start_to_finish():
+    seen = []
+    probe(SAMPLE, progress=seen.append)
+    assert seen[0] == 0
+    assert seen[-1] == 100
+    assert seen == sorted(seen)
+
+
 def test_missing_file_raises(tmp_path):
     with pytest.raises(ProbeError):
         probe(tmp_path / "nope.mp4")
