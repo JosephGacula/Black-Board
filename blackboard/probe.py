@@ -8,6 +8,11 @@ from typing import Optional
 # packaged (windowed) app runs ffprobe. It does nothing on other systems.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# How many seconds the audio and video lengths may differ and still count as
+# "matching". Audio is stored in small chunks (an AAC chunk is about 23 ms),
+# so a tiny gap is normal even in a perfectly good file.
+AV_TOLERANCE = 0.2
+
 
 @dataclass
 class VideoInfo:
@@ -29,9 +34,30 @@ class VideoInfo:
     avg_gop: Optional[float] = None        # average frames between keyframes
     max_gop: Optional[int] = None          # longest gap between keyframes
 
+    # Audio details (first audio track). All None when there is no audio.
+    audio_codec: Optional[str] = None           # e.g. "aac"
+    audio_sample_rate: Optional[int] = None     # samples per second, e.g. 48000
+    audio_channels: Optional[int] = None        # 1 = mono, 2 = stereo
+    audio_bitrate: Optional[int] = None         # bits per second
+    audio_duration: Optional[float] = None      # seconds
+    audio_track_count: int = 0                  # number of audio tracks
+
     @property
     def resolution(self) -> str:
         return f"{self.width}x{self.height}"
+
+    @property
+    def audio_length_diff(self) -> Optional[float]:
+        """Audio length minus video length, in seconds (None if unknown)."""
+        if self.audio_duration is None or self.duration <= 0:
+            return None
+        return self.audio_duration - self.duration
+
+    @property
+    def audio_matches_video(self) -> Optional[bool]:
+        """True if the audio and video are about the same length."""
+        diff = self.audio_length_diff
+        return None if diff is None else abs(diff) <= AV_TOLERANCE
 
 
 class ProbeError(Exception):
@@ -89,6 +115,29 @@ def _parse_fps(stream):
         if fps > 0:
             return fps
     return 0.0
+
+
+def audio_fields(streams):
+    """Pick out the audio details from ffprobe's list of streams.
+
+    Returns a dict whose keys match the audio fields of VideoInfo, so
+    probe() can pass it straight in with **audio_fields(streams).
+    The details come from the first audio track; audio_track_count
+    counts all of them.
+    """
+    tracks = [s for s in streams if s.get("codec_type") == "audio"]
+    if not tracks:
+        return {"audio_track_count": 0}
+
+    first = tracks[0]
+    return {
+        "audio_codec": first.get("codec_name"),
+        "audio_sample_rate": _to_int(first.get("sample_rate")),
+        "audio_channels": _to_int(first.get("channels")),
+        "audio_bitrate": _to_int(first.get("bit_rate")),
+        "audio_duration": _to_float(first.get("duration")),
+        "audio_track_count": len(tracks),
+    }
 
 
 def get_gop_info(path, stream_index, total_frames=None, progress=None):
@@ -208,6 +257,7 @@ def probe(path, progress=None):
             keyframe_count=keyframes,
             avg_gop=avg_gop,
             max_gop=max_gop,
+            **audio_fields(streams),
         )
     except KeyError as e:
         raise ProbeError(f"The video stream is missing required data: {e}")

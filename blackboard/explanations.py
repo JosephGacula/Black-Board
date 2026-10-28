@@ -58,4 +58,36 @@ FIELD_HELP = {
         "compresses better."
     ),
     "Audio": "Whether the file contains an audio track.",
+    "Audio tracks": (
+        "How many separate audio tracks the file holds. Most videos have "
+        "one. Extra tracks might carry another language, commentary, or a "
+        "separate mix. The details below describe the first track."
+    ),
+    "Audio codec": (
+        "The compression format used to store the sound, such as AAC (the "
+        "usual choice for MP4) or Opus. Like a video codec, it decides how "
+        "small the audio is squeezed and which players can play it."
+    ),
+    "Sample rate": (
+        "How many times per second the sound is measured, in kilohertz. "
+        "44.1 kHz is CD quality and 48 kHz is the standard for video. "
+        "Higher rates can capture higher pitches, but 48 kHz already "
+        "covers everything people can hear."
+    ),
+    "Channels": (
+        "How many separate sound signals are stored. Mono is one (the same "
+        "sound from every speaker), stereo is two (left and right), and "
+        "surround formats have more, such as 6 for 5.1."
+    ),
+    "Audio bitrate": (
+        "How much data is used for each second of sound, in kilobits per "
+        "second. Higher bitrates keep more audio detail and make bigger "
+        "files. Stereo AAC is often somewhere around 128 to 192 kbps."
+    ),
+    "Audio length": (
+        "Whether the sound runs for the same time as the picture. A gap of "
+        "a fraction of a second is normal. A bigger gap usually means the "
+        "sound is cut off early, or the picture keeps going after the "
+        "sound has ended."
+    ),
 }

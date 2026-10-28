@@ -15,7 +15,13 @@ from blackboard.probe import probe, ProbeError
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
                "Frames", "Bitrate", "Pixel format", "Color space",
-               "Keyframes", "Average GOP", "Audio"]
+               "Keyframes", "Average GOP", "Audio", "Audio tracks",
+               "Audio codec", "Sample rate", "Channels", "Audio bitrate",
+               "Audio length"]
+
+# Rows that describe the audio track itself; they say "n/a" if there is none
+AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
+                       "Audio bitrate", "Audio length"]
 
 PREVIEW_W, PREVIEW_H = 640, 360
 
@@ -23,6 +29,26 @@ PREVIEW_W, PREVIEW_H = 640, 360
 def fmt(value, template="{}"):
     """Show 'unknown' for missing values instead of 'None'."""
     return "unknown" if value is None else template.format(value)
+
+
+def channel_label(channels):
+    """1 -> 'Mono', 2 -> 'Stereo', 6 -> '6 channels'."""
+    if channels is None:
+        return "unknown"
+    names = {1: "Mono", 2: "Stereo"}
+    return names.get(channels, f"{channels} channels")
+
+
+def audio_length_text(info):
+    """Say whether the audio and video lengths match, in plain words."""
+    diff = info.audio_length_diff
+    if diff is None:
+        return "unknown"
+    if info.audio_matches_video:
+        return f"Matches video (off by {abs(diff):.2f} s)"
+    if diff < 0:
+        return f"Audio is {abs(diff):.2f} s shorter"
+    return f"Audio is {diff:.2f} s longer"
 
 
 def last_frame_index(info):
@@ -96,7 +122,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Black Board")
-        self.resize(1000, 540)
+        self.resize(1000, 660)
 
         self.probe_thread = None
         self.frame_thread = None
@@ -245,6 +271,21 @@ class MainWindow(QMainWindow):
         f["Keyframes"].setText(fmt(info.keyframe_count))
         f["Average GOP"].setText(fmt(info.avg_gop, "{:.1f} frames"))
         f["Audio"].setText("Yes" if info.has_audio else "No")
+        f["Audio tracks"].setText(str(info.audio_track_count))
+
+        if not info.has_audio:
+            for name in AUDIO_DETAIL_FIELDS:
+                f[name].setText("n/a")
+            return
+        f["Audio codec"].setText(fmt(info.audio_codec))
+        f["Sample rate"].setText(
+            fmt(None if info.audio_sample_rate is None
+                else info.audio_sample_rate / 1000, "{:g} kHz"))
+        f["Channels"].setText(channel_label(info.audio_channels))
+        f["Audio bitrate"].setText(
+            fmt(None if info.audio_bitrate is None
+                else info.audio_bitrate / 1000, "{:.0f} kbps"))
+        f["Audio length"].setText(audio_length_text(info))
 
     # ---------- the frame preview ----------
 
