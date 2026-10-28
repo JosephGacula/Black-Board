@@ -9,8 +9,9 @@ from PySide6.QtWidgets import (
     QSlider, QSpinBox,
 )
 
+from blackboard.analyze import analyze_frame
 from blackboard.decode import read_frame, DecodeError
-from blackboard.explanations import FIELD_HELP
+from blackboard.explanations import ANALYSIS_HELP, FIELD_HELP
 from blackboard.probe import probe, ProbeError
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
@@ -22,6 +23,9 @@ FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
 # Rows that describe the audio track itself; they say "n/a" if there is none
 AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
                        "Audio bitrate", "Audio length"]
+
+# Rows of the "Frame analysis" panel under the preview
+ANALYSIS_NAMES = ["Brightness"]
 
 PREVIEW_W, PREVIEW_H = 640, 360
 
@@ -97,8 +101,10 @@ class ProbeThread(QThread):
 
 
 class FrameThread(QThread):
-    """Reads one frame in the background and turns it into a QImage."""
-    loaded = Signal(str, int, object)   # video path, frame number, QImage
+    """Reads one frame in the background, turns it into a QImage and
+    measures it."""
+    # video path, frame number, QImage, FrameStats (None if measuring failed)
+    loaded = Signal(str, int, object, object)
     failed = Signal(str, int, str)      # video path, frame number, message
 
     def __init__(self, path, index, parent=None):
@@ -112,10 +118,17 @@ class FrameThread(QThread):
             image = frame_to_qimage(frame.image)
         except DecodeError as e:
             self.failed.emit(self.path, self.index, str(e))
+            return
         except Exception as e:
             self.failed.emit(self.path, self.index, f"Unexpected error: {e}")
-        else:
-            self.loaded.emit(self.path, self.index, image)
+            return
+
+        # A problem in the measurements shouldn't stop the picture showing
+        try:
+            stats = analyze_frame(frame.image)
+        except Exception:
+            stats = None
+        self.loaded.emit(self.path, self.index, image, stats)
 
 
 class MainWindow(QMainWindow):
@@ -179,6 +192,22 @@ class MainWindow(QMainWindow):
         self.frame_spin.valueChanged.connect(self.on_frame_changed)
 
         self.frame_info = QLabel("")
+
+        # --- Right, under the preview: measurements for the current frame ---
+        self.analysis_title = QLabel("Frame analysis")
+        self.analysis_title.setStyleSheet("font-weight: bold;")
+        self.analysis_fields = {}
+        analysis_form = QFormLayout()
+        for name in ANALYSIS_NAMES:
+            # Hovering over either the name or the value shows an explanation
+            tip = textwrap.fill(ANALYSIS_HELP[name], width=55)
+            name_label = QLabel(name + ":")
+            name_label.setToolTip(tip)
+            value_label = QLabel("-")
+            value_label.setToolTip(tip)
+            self.analysis_fields[name] = value_label
+            analysis_form.addRow(name_label, value_label)
+
         self.clear_preview()
 
         slider_row = QHBoxLayout()
@@ -189,6 +218,9 @@ class MainWindow(QMainWindow):
         preview_column.addWidget(self.preview)
         preview_column.addLayout(slider_row)
         preview_column.addWidget(self.frame_info)
+        preview_column.addSpacing(8)
+        preview_column.addWidget(self.analysis_title)
+        preview_column.addLayout(analysis_form)
         preview_column.addStretch()
 
         body = QHBoxLayout()
@@ -297,6 +329,18 @@ class MainWindow(QMainWindow):
         self.preview.clear()
         self.preview.setText("Open a video to see its frames")
         self.frame_info.setText("")
+        self.clear_analysis()
+
+    def clear_analysis(self):
+        for label in self.analysis_fields.values():
+            label.setText("-")
+
+    def show_analysis(self, stats):
+        if stats is None:
+            for label in self.analysis_fields.values():
+                label.setText("unavailable")
+            return
+        self.analysis_fields["Brightness"].setText(f"{stats.brightness:.1f} %")
 
     def setup_preview(self, info):
         last = last_frame_index(info)
@@ -353,14 +397,16 @@ class MainWindow(QMainWindow):
         if self.info is not None and self.wanted_index != self.last_requested:
             self.start_frame_thread()
 
-    def on_frame_loaded(self, path, index, image):
+    def on_frame_loaded(self, path, index, image, stats):
         if path != self.current_path:
             return   # a late result for a video that is no longer open
         self.preview.setPixmap(QPixmap.fromImage(image))
+        self.show_analysis(stats)
 
     def on_frame_failed(self, path, index, message):
         if path != self.current_path:
             return
+        self.clear_analysis()
         self.preview.clear()
         self.preview.setText(f"Could not read frame {index}.\n{message}")
 

@@ -91,3 +91,14 @@ FIELD_HELP = {
         "sound has ended."
     ),
 }
+
+# Explanations for the "Frame analysis" rows. Keys must match ANALYSIS_NAMES
+# in the window.
+ANALYSIS_HELP = {
+    "Brightness": (
+        "How light the picture is on average, from 0% (pure black) to "
+        "100% (pure white). Low numbers mean a dark image and high numbers "
+        "a bright one. It is measured the way the eye sees it, so green "
+        "counts the most and blue the least."
+    ),
+}
