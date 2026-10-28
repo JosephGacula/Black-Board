@@ -25,7 +25,7 @@ AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
                        "Audio bitrate", "Audio length"]
 
 # Rows of the "Frame analysis" panel under the preview
-ANALYSIS_NAMES = ["Brightness"]
+ANALYSIS_NAMES = ["Brightness", "Contrast"]
 
 PREVIEW_W, PREVIEW_H = 640, 360
 
@@ -341,6 +341,7 @@ class MainWindow(QMainWindow):
                 label.setText("unavailable")
             return
         self.analysis_fields["Brightness"].setText(f"{stats.brightness:.1f} %")
+        self.analysis_fields["Contrast"].setText(f"{stats.contrast:.1f} %")
 
     def setup_preview(self, info):
         last = last_frame_index(info)

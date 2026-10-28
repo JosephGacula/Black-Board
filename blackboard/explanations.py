@@ -101,4 +101,11 @@ ANALYSIS_HELP = {
         "a bright one. It is measured the way the eye sees it, so green "
         "counts the most and blue the least."
     ),
+    "Contrast": (
+        "How far apart the dark and bright areas of the picture are. 0% "
+        "means flat: everything is about the same brightness. 100% means "
+        "deep blacks and bright whites. Low contrast looks soft or foggy, "
+        "and high contrast looks punchy. The darkest and brightest 5% of "
+        "pixels are ignored, so a few stray pixels don't change it."
+    ),
 }

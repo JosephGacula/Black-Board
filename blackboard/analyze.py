@@ -52,13 +52,37 @@ def brightness_percent(gray):
     return float(gray.mean()) / 255 * 100
 
 
+# Contrast compares the darkest and brightest of the picture, but ignores the
+# most extreme 5% at each end so a few stray pixels (a tiny logo, a speck of
+# noise) can't change the answer.
+CONTRAST_LOW_PERCENTILE = 5
+CONTRAST_HIGH_PERCENTILE = 95
+
+
+def contrast_percent(gray):
+    """How far apart the dark and bright parts of a luma array are.
+
+    0 means flat: nearly every pixel has the same brightness. 100 means the
+    dark end reaches black and the bright end reaches white.
+    """
+    if gray.size == 0:
+        raise ValueError("Cannot measure an empty image.")
+    low, high = np.percentile(
+        gray, [CONTRAST_LOW_PERCENTILE, CONTRAST_HIGH_PERCENTILE])
+    return float(high - low) / 255 * 100
+
+
 @dataclass
 class FrameStats:
     brightness: float   # percent, 0 (black) to 100 (white)
+    contrast: float     # percent, 0 (flat) to 100 (black to white)
 
 
 def analyze_frame(image):
     """Take every measurement we have for one frame (a BGR array)."""
     small = prepare(image)
     gray = luma(small)
-    return FrameStats(brightness=brightness_percent(gray))
+    return FrameStats(
+        brightness=brightness_percent(gray),
+        contrast=contrast_percent(gray),
+    )
