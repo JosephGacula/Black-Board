@@ -72,17 +72,50 @@ def contrast_percent(gray):
     return float(high - low) / 255 * 100
 
 
+# A pixel counts as clipped when it is pure black or white, or very close.
+# Video compression rarely leaves a "black" pixel at exactly 0, so we allow a
+# small margin: 5 out of 255 is about 2% and 250 out of 255 is about 98%.
+CLIP_BLACK_MAX = 5
+CLIP_WHITE_MIN = 250
+
+
+def clipping_masks(gray):
+    """Mark the clipped pixels of a luma array.
+
+    Returns two True/False arrays the same shape as the image: one that is
+    True where a pixel is crushed to black, and one where it is blown out to
+    white. (The exposure overlay will draw these on the preview.)
+    """
+    return gray <= CLIP_BLACK_MAX, gray >= CLIP_WHITE_MIN
+
+
+def clipping_percent(gray):
+    """The share of pixels that are clipped, as (crushed_blacks, blown_highlights).
+
+    Each is a percentage of all the pixels, from 0 to 100.
+    """
+    if gray.size == 0:
+        raise ValueError("Cannot measure an empty image.")
+    black, white = clipping_masks(gray)
+    return float(black.mean()) * 100, float(white.mean()) * 100
+
+
 @dataclass
 class FrameStats:
-    brightness: float   # percent, 0 (black) to 100 (white)
-    contrast: float     # percent, 0 (flat) to 100 (black to white)
+    brightness: float         # percent, 0 (black) to 100 (white)
+    contrast: float           # percent, 0 (flat) to 100 (black to white)
+    crushed_blacks: float     # percent of pixels at or near pure black
+    blown_highlights: float   # percent of pixels at or near pure white
 
 
 def analyze_frame(image):
     """Take every measurement we have for one frame (a BGR array)."""
     small = prepare(image)
     gray = luma(small)
+    crushed, blown = clipping_percent(gray)
     return FrameStats(
         brightness=brightness_percent(gray),
         contrast=contrast_percent(gray),
+        crushed_blacks=crushed,
+        blown_highlights=blown,
     )

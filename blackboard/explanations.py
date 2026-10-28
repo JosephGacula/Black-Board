@@ -108,4 +108,18 @@ ANALYSIS_HELP = {
         "and high contrast looks punchy. The darkest and brightest 5% of "
         "pixels are ignored, so a few stray pixels don't change it."
     ),
+    "Crushed blacks": (
+        "The share of the picture that is pure black or very close to it "
+        "(about 2% brightness or less). A large share means shadow detail "
+        "is lost, because dark areas have all turned into one flat black. "
+        "Some black is normal, such as bars at the top and bottom of a "
+        "widescreen picture or a dark background."
+    ),
+    "Blown highlights": (
+        "The share of the picture that is pure white or very close to it "
+        "(about 98% brightness or more). A large share means highlight "
+        "detail is lost, because bright areas have all turned into one "
+        "flat white. Some white is normal, such as a white background or "
+        "a light source in the shot."
+    ),
 }

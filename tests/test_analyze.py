@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 
 from blackboard.analyze import (
-    ANALYSIS_WIDTH, FrameStats, analyze_frame, brightness_percent,
-    contrast_percent, luma, prepare,
+    ANALYSIS_WIDTH, CLIP_BLACK_MAX, CLIP_WHITE_MIN, FrameStats, analyze_frame,
+    brightness_percent, clipping_masks, clipping_percent, contrast_percent,
+    luma, prepare,
 )
 from blackboard.decode import read_frame
 
@@ -108,6 +109,8 @@ def test_analyze_frame_returns_stats():
     assert isinstance(stats, FrameStats)
     assert stats.brightness == pytest.approx(100)
     assert stats.contrast == 0
+    assert stats.crushed_blacks == 0
+    assert stats.blown_highlights == pytest.approx(100)
 
 
 # ---------- contrast ----------
@@ -218,3 +221,83 @@ def test_decoded_video_contrast(tmp_path):
     )
     assert analyze_frame(read_frame(flat, 0).image).contrast < 2
     assert analyze_frame(read_frame(split, 0).image).contrast > 98
+
+
+# ---------- clipping ----------
+
+def test_clipping_of_black_and_white_images():
+    assert clipping_percent(luma(solid(0, 0, 0))) == (100, 0)
+    assert clipping_percent(luma(solid(255, 255, 255))) == (0, 100)
+
+
+def test_clipping_of_mid_gray_is_zero():
+    assert clipping_percent(luma(solid(128, 128, 128))) == (0, 0)
+
+
+def test_clipping_half_black_half_white():
+    crushed, blown = clipping_percent(gray_with_bands((0, 50), (255, 50)))
+    assert (crushed, blown) == (50, 50)
+
+
+def test_clipping_counts_a_small_patch():
+    # 10% white patch on mid-gray: no black, a tenth of the picture blown out
+    gray = gray_with_bands((128, 90), (255, 10))
+    assert clipping_percent(gray) == (0, pytest.approx(10))
+
+
+def test_clipping_includes_pixels_close_to_black_and_white():
+    # Right on the margins counts as clipped...
+    near = gray_with_bands((CLIP_BLACK_MAX, 25), (CLIP_WHITE_MIN, 25), (128, 50))
+    assert clipping_percent(near) == (pytest.approx(25), pytest.approx(25))
+    # ...and one step inside the margins does not
+    inside = gray_with_bands(
+        (CLIP_BLACK_MAX + 1, 25), (CLIP_WHITE_MIN - 1, 25), (128, 50))
+    assert clipping_percent(inside) == (0, 0)
+
+
+def test_clipping_masks_mark_the_right_pixels():
+    gray = np.array([[0, 128, 255]], np.uint8)
+    black, white = clipping_masks(gray)
+    assert black.tolist() == [[True, False, False]]
+    assert white.tolist() == [[False, False, True]]
+    assert black.shape == white.shape == gray.shape
+
+
+def test_clipping_of_empty_array_raises():
+    with pytest.raises(ValueError):
+        clipping_percent(np.zeros((0, 0), np.uint8))
+
+
+def test_shrinking_barely_changes_clipping():
+    # Left third black, right third white, a gradient in between
+    ramp = np.concatenate([
+        np.zeros(640, np.uint8), np.linspace(0, 255, 640).astype(np.uint8),
+        np.full(640, 255, np.uint8),
+    ])
+    image = np.repeat(ramp[None, :, None], 1080, axis=0).repeat(3, axis=2)
+    full = clipping_percent(luma(image))
+    small = analyze_frame(image)
+    assert small.crushed_blacks == pytest.approx(full[0], abs=1.0)
+    assert small.blown_highlights == pytest.approx(full[1], abs=1.0)
+
+
+@needs_ffmpeg
+def test_decoded_video_clipping(tmp_path):
+    black = make_color_clip(tmp_path / "black.mp4", "black")
+    white = make_color_clip(tmp_path / "white.mp4", "white")
+    gray = make_color_clip(tmp_path / "gray.mp4", "gray")
+    split = make_clip(
+        tmp_path / "split.mp4",
+        ["-f", "lavfi", "-i", "color=c=black:s=160x240:d=1:r=30",
+         "-f", "lavfi", "-i", "color=c=white:s=160x240:d=1:r=30"],
+        ["-filter_complex", "[0:v][1:v]hstack"],
+    )
+    b = analyze_frame(read_frame(black, 0).image)
+    w = analyze_frame(read_frame(white, 0).image)
+    g = analyze_frame(read_frame(gray, 0).image)
+    s = analyze_frame(read_frame(split, 0).image)
+    assert (b.crushed_blacks, b.blown_highlights) == (pytest.approx(100, abs=1), 0)
+    assert (w.crushed_blacks, w.blown_highlights) == (0, pytest.approx(100, abs=1))
+    assert (g.crushed_blacks, g.blown_highlights) == (0, 0)
+    assert s.crushed_blacks == pytest.approx(50, abs=3)
+    assert s.blown_highlights == pytest.approx(50, abs=3)

@@ -4,8 +4,8 @@ import cv2
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QSizePolicy,
-    QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
+    QSizePolicy, QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
     QSlider, QSpinBox,
 )
 
@@ -25,7 +25,12 @@ AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
                        "Audio bitrate", "Audio length"]
 
 # Rows of the "Frame analysis" panel under the preview
-ANALYSIS_NAMES = ["Brightness", "Contrast"]
+ANALYSIS_NAMES = ["Brightness", "Contrast", "Crushed blacks",
+                  "Blown highlights"]
+
+# The panel fills this many rows, then starts a new column, so it never
+# grows taller however many measurements we add.
+ANALYSIS_ROWS = 4
 
 PREVIEW_W, PREVIEW_H = 640, 360
 
@@ -135,7 +140,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Black Board")
-        self.resize(1000, 660)
+        self.resize(1000, 700)
 
         self.probe_thread = None
         self.frame_thread = None
@@ -197,8 +202,9 @@ class MainWindow(QMainWindow):
         self.analysis_title = QLabel("Frame analysis")
         self.analysis_title.setStyleSheet("font-weight: bold;")
         self.analysis_fields = {}
-        analysis_form = QFormLayout()
-        for name in ANALYSIS_NAMES:
+        self.analysis_grid = QGridLayout()
+        self.analysis_grid.setHorizontalSpacing(10)
+        for i, name in enumerate(ANALYSIS_NAMES):
             # Hovering over either the name or the value shows an explanation
             tip = textwrap.fill(ANALYSIS_HELP[name], width=55)
             name_label = QLabel(name + ":")
@@ -206,7 +212,16 @@ class MainWindow(QMainWindow):
             value_label = QLabel("-")
             value_label.setToolTip(tip)
             self.analysis_fields[name] = value_label
-            analysis_form.addRow(name_label, value_label)
+
+            # Each column of the panel uses three grid columns: name, value
+            # and a gap before the next column
+            row, column = i % ANALYSIS_ROWS, i // ANALYSIS_ROWS * 3
+            self.analysis_grid.addWidget(name_label, row, column)
+            self.analysis_grid.addWidget(value_label, row, column + 1)
+            self.analysis_grid.setColumnMinimumWidth(column + 2, 28)
+        # Spare width goes to the right, so the columns stay together
+        last_column = (len(ANALYSIS_NAMES) - 1) // ANALYSIS_ROWS * 3 + 2
+        self.analysis_grid.setColumnStretch(last_column, 1)
 
         self.clear_preview()
 
@@ -220,7 +235,7 @@ class MainWindow(QMainWindow):
         preview_column.addWidget(self.frame_info)
         preview_column.addSpacing(8)
         preview_column.addWidget(self.analysis_title)
-        preview_column.addLayout(analysis_form)
+        preview_column.addLayout(self.analysis_grid)
         preview_column.addStretch()
 
         body = QHBoxLayout()
@@ -342,6 +357,8 @@ class MainWindow(QMainWindow):
             return
         self.analysis_fields["Brightness"].setText(f"{stats.brightness:.1f} %")
         self.analysis_fields["Contrast"].setText(f"{stats.contrast:.1f} %")
+        self.analysis_fields["Crushed blacks"].setText(f"{stats.crushed_blacks:.1f} %")
+        self.analysis_fields["Blown highlights"].setText(f"{stats.blown_highlights:.1f} %")
 
     def setup_preview(self, info):
         last = last_frame_index(info)
