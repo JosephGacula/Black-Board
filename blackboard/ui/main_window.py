@@ -11,8 +11,9 @@ from PySide6.QtWidgets import (
 
 from blackboard.analyze import analyze_frame
 from blackboard.decode import read_frame, DecodeError
-from blackboard.explanations import ANALYSIS_HELP, FIELD_HELP
+from blackboard.explanations import ANALYSIS_HELP, FIELD_HELP, HISTOGRAM_HELP
 from blackboard.probe import probe, ProbeError
+from blackboard.ui.histogram_view import HistogramView
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
                "Frames", "Bitrate", "Pixel format", "Color space",
@@ -26,7 +27,8 @@ AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
 
 # Rows of the "Frame analysis" panel under the preview
 ANALYSIS_NAMES = ["Brightness", "Contrast", "Crushed blacks",
-                  "Blown highlights"]
+                  "Blown highlights", "Dark areas", "Mid-tones",
+                  "Bright areas"]
 
 # The panel fills this many rows, then starts a new column, so it never
 # grows taller however many measurements we add.
@@ -223,6 +225,30 @@ class MainWindow(QMainWindow):
         last_column = (len(ANALYSIS_NAMES) - 1) // ANALYSIS_ROWS * 3 + 2
         self.analysis_grid.setColumnStretch(last_column, 1)
 
+        # The brightness histogram sits beside the numbers, with its own
+        # heading so it lines up with "Frame analysis" on the left
+        histogram_tip = textwrap.fill(HISTOGRAM_HELP, width=55)
+        self.histogram_title = QLabel("Luminance histogram")
+        self.histogram_title.setStyleSheet("font-weight: bold;")
+        self.histogram_title.setToolTip(histogram_tip)
+        self.histogram_view = HistogramView()
+        self.histogram_view.setToolTip(histogram_tip)
+
+        numbers_column = QVBoxLayout()
+        numbers_column.addWidget(self.analysis_title)
+        numbers_column.addLayout(self.analysis_grid)
+        numbers_column.addStretch()
+
+        histogram_column = QVBoxLayout()
+        histogram_column.addWidget(self.histogram_title)
+        histogram_column.addWidget(self.histogram_view)
+        histogram_column.addStretch()
+
+        analysis_row = QHBoxLayout()
+        analysis_row.addLayout(numbers_column)
+        analysis_row.addSpacing(16)
+        analysis_row.addLayout(histogram_column, 1)
+
         self.clear_preview()
 
         slider_row = QHBoxLayout()
@@ -234,8 +260,7 @@ class MainWindow(QMainWindow):
         preview_column.addLayout(slider_row)
         preview_column.addWidget(self.frame_info)
         preview_column.addSpacing(8)
-        preview_column.addWidget(self.analysis_title)
-        preview_column.addLayout(self.analysis_grid)
+        preview_column.addLayout(analysis_row)
         preview_column.addStretch()
 
         body = QHBoxLayout()
@@ -349,16 +374,22 @@ class MainWindow(QMainWindow):
     def clear_analysis(self):
         for label in self.analysis_fields.values():
             label.setText("-")
+        self.histogram_view.set_histogram(None)
 
     def show_analysis(self, stats):
         if stats is None:
             for label in self.analysis_fields.values():
                 label.setText("unavailable")
+            self.histogram_view.set_histogram(None)
             return
         self.analysis_fields["Brightness"].setText(f"{stats.brightness:.1f} %")
         self.analysis_fields["Contrast"].setText(f"{stats.contrast:.1f} %")
         self.analysis_fields["Crushed blacks"].setText(f"{stats.crushed_blacks:.1f} %")
         self.analysis_fields["Blown highlights"].setText(f"{stats.blown_highlights:.1f} %")
+        self.analysis_fields["Dark areas"].setText(f"{stats.dark_share:.1f} %")
+        self.analysis_fields["Mid-tones"].setText(f"{stats.mid_share:.1f} %")
+        self.analysis_fields["Bright areas"].setText(f"{stats.bright_share:.1f} %")
+        self.histogram_view.set_histogram(stats.histogram)
 
     def setup_preview(self, info):
         last = last_frame_index(info)

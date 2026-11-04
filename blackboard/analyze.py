@@ -100,12 +100,55 @@ def clipping_percent(gray):
     return float(black.mean()) * 100, float(white.mean()) * 100
 
 
+# The brightness range 0-255 is split into thirds for the dark / mid / bright
+# summary: 0 to 85 is dark, 86 to 170 is mid, 171 to 255 is bright.
+ZONE_DARK_MAX = 85
+ZONE_MID_MAX = 170
+
+
+def luminance_histogram(gray):
+    """Count how many pixels have each brightness from 0 to 255.
+
+    Returns an array of 256 counts: counts[0] is the number of pure black
+    pixels, counts[255] the number of pure white ones, and so on.
+    """
+    if gray.size == 0:
+        raise ValueError("Cannot measure an empty image.")
+    return np.bincount(gray.ravel(), minlength=256)
+
+
+def combine_histograms(histograms):
+    """Add several histograms (for example one per frame) into one.
+
+    The result describes all of those frames together, as if they were one
+    big picture.
+    """
+    if len(histograms) == 0:
+        raise ValueError("Nothing to combine.")
+    return np.sum(histograms, axis=0)
+
+
+def tonal_zones_percent(histogram):
+    """Split a histogram into thirds: (dark, mid, bright) as percentages."""
+    total = histogram.sum()
+    if total == 0:
+        raise ValueError("The histogram is empty.")
+    dark = histogram[:ZONE_DARK_MAX + 1].sum()
+    mid = histogram[ZONE_DARK_MAX + 1:ZONE_MID_MAX + 1].sum()
+    bright = histogram[ZONE_MID_MAX + 1:].sum()
+    return tuple(float(part) / total * 100 for part in (dark, mid, bright))
+
+
 @dataclass
 class FrameStats:
     brightness: float         # percent, 0 (black) to 100 (white)
     contrast: float           # percent, 0 (flat) to 100 (black to white)
     crushed_blacks: float     # percent of pixels at or near pure black
     blown_highlights: float   # percent of pixels at or near pure white
+    dark_share: float         # percent of pixels in the darkest third
+    mid_share: float          # percent of pixels in the middle third
+    bright_share: float       # percent of pixels in the brightest third
+    histogram: np.ndarray     # 256 pixel counts, from black to white
 
 
 def analyze_frame(image):
@@ -113,9 +156,15 @@ def analyze_frame(image):
     small = prepare(image)
     gray = luma(small)
     crushed, blown = clipping_percent(gray)
+    histogram = luminance_histogram(gray)
+    dark, mid, bright = tonal_zones_percent(histogram)
     return FrameStats(
         brightness=brightness_percent(gray),
         contrast=contrast_percent(gray),
         crushed_blacks=crushed,
         blown_highlights=blown,
+        dark_share=dark,
+        mid_share=mid,
+        bright_share=bright,
+        histogram=histogram,
     )

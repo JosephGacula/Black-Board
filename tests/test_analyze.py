@@ -10,9 +10,10 @@ import numpy as np
 import pytest
 
 from blackboard.analyze import (
-    ANALYSIS_WIDTH, CLIP_BLACK_MAX, CLIP_WHITE_MIN, FrameStats, analyze_frame,
-    brightness_percent, clipping_masks, clipping_percent, contrast_percent,
-    luma, prepare,
+    ANALYSIS_WIDTH, CLIP_BLACK_MAX, CLIP_WHITE_MIN, ZONE_DARK_MAX,
+    ZONE_MID_MAX, FrameStats, analyze_frame, brightness_percent,
+    clipping_masks, clipping_percent, combine_histograms, contrast_percent,
+    luminance_histogram, luma, prepare, tonal_zones_percent,
 )
 from blackboard.decode import read_frame
 
@@ -111,6 +112,9 @@ def test_analyze_frame_returns_stats():
     assert stats.contrast == 0
     assert stats.crushed_blacks == 0
     assert stats.blown_highlights == pytest.approx(100)
+    assert (stats.dark_share, stats.mid_share) == (0, 0)
+    assert stats.bright_share == pytest.approx(100)
+    assert len(stats.histogram) == 256
 
 
 # ---------- contrast ----------
@@ -301,3 +305,102 @@ def test_decoded_video_clipping(tmp_path):
     assert (g.crushed_blacks, g.blown_highlights) == (0, 0)
     assert s.crushed_blacks == pytest.approx(50, abs=3)
     assert s.blown_highlights == pytest.approx(50, abs=3)
+
+
+# ---------- luminance histogram ----------
+
+def test_histogram_has_256_counts_that_add_up_to_the_pixel_count():
+    hist = luminance_histogram(luma(solid(10, 200, 30, height=6, width=7)))
+    assert len(hist) == 256
+    assert hist.sum() == 6 * 7
+
+
+def test_histogram_of_black_and_white_images():
+    black = luminance_histogram(luma(solid(0, 0, 0, height=10, width=10)))
+    white = luminance_histogram(luma(solid(255, 255, 255, height=10, width=10)))
+    assert black[0] == 100 and black.sum() == 100
+    assert white[255] == 100 and white.sum() == 100
+
+
+def test_histogram_of_half_black_half_white():
+    hist = luminance_histogram(gray_with_bands((0, 50), (255, 50)))
+    assert hist[0] == 50 and hist[255] == 50 and hist.sum() == 100
+
+
+def test_histogram_of_a_ramp_has_one_pixel_in_every_bin():
+    ramp = np.arange(256, dtype=np.uint8).reshape(1, -1)
+    assert (luminance_histogram(ramp) == 1).all()
+
+
+def test_histogram_of_empty_array_raises():
+    with pytest.raises(ValueError):
+        luminance_histogram(np.zeros((0, 0), np.uint8))
+
+
+def test_combining_histograms_adds_them_up():
+    black = luminance_histogram(gray_with_bands((0, 100)))
+    white = luminance_histogram(gray_with_bands((255, 100)))
+    both = combine_histograms([black, white])
+    assert both[0] == 100 and both[255] == 100 and both.sum() == 200
+    assert len(both) == 256
+
+
+def test_combined_histogram_describes_all_the_frames_together():
+    # Three black frames and one white frame: three quarters of all the
+    # pixels are dark
+    frames = [gray_with_bands((0, 100))] * 3 + [gray_with_bands((255, 100))]
+    combined = combine_histograms([luminance_histogram(f) for f in frames])
+    dark, mid, bright = tonal_zones_percent(combined)
+    assert (dark, mid, bright) == (pytest.approx(75), 0, pytest.approx(25))
+
+
+def test_combining_nothing_raises():
+    with pytest.raises(ValueError):
+        combine_histograms([])
+
+
+# ---------- dark / mid / bright thirds ----------
+
+def zones_of(*bands):
+    return tonal_zones_percent(luminance_histogram(gray_with_bands(*bands)))
+
+
+def test_zones_of_black_gray_and_white():
+    assert zones_of((0, 10)) == (100, 0, 0)
+    assert zones_of((128, 10)) == (0, 100, 0)
+    assert zones_of((255, 10)) == (0, 0, 100)
+
+
+def test_zone_edges():
+    assert zones_of((ZONE_DARK_MAX, 10))[0] == 100          # still dark
+    assert zones_of((ZONE_DARK_MAX + 1, 10))[1] == 100      # first mid value
+    assert zones_of((ZONE_MID_MAX, 10))[1] == 100           # last mid value
+    assert zones_of((ZONE_MID_MAX + 1, 10))[2] == 100       # first bright value
+
+
+def test_zones_always_add_up_to_100():
+    rng = np.random.default_rng(1)
+    gray = rng.integers(0, 256, (40, 50), dtype=np.uint8)
+    assert sum(tonal_zones_percent(luminance_histogram(gray))) == pytest.approx(100)
+
+
+def test_zones_of_an_empty_histogram_raise():
+    with pytest.raises(ValueError):
+        tonal_zones_percent(np.zeros(256, np.int64))
+
+
+def test_analyze_frame_histogram_covers_the_shrunken_picture():
+    stats = analyze_frame(np.zeros((1080, 1920, 3), np.uint8))
+    assert stats.histogram.sum() == 360 * ANALYSIS_WIDTH      # shrunk first
+    assert stats.histogram[0] == stats.histogram.sum()
+    assert stats.dark_share == 100
+
+
+@needs_ffmpeg
+def test_decoded_video_tonal_zones(tmp_path):
+    black = analyze_frame(read_frame(make_color_clip(tmp_path / "b.mp4", "black"), 0).image)
+    gray = analyze_frame(read_frame(make_color_clip(tmp_path / "g.mp4", "gray"), 0).image)
+    white = analyze_frame(read_frame(make_color_clip(tmp_path / "w.mp4", "white"), 0).image)
+    assert (black.dark_share, black.mid_share, black.bright_share) == (pytest.approx(100, abs=1), pytest.approx(0, abs=1), 0)
+    assert (gray.dark_share, gray.mid_share, gray.bright_share) == (0, pytest.approx(100), 0)
+    assert (white.dark_share, white.mid_share, white.bright_share) == (0, 0, pytest.approx(100, abs=1))

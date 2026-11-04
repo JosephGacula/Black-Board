@@ -122,4 +122,28 @@ ANALYSIS_HELP = {
         "flat white. Some white is normal, such as a white background or "
         "a light source in the shot."
     ),
+    "Dark areas": (
+        "The share of the picture in the darkest third of the brightness "
+        "range (about 0% to 33%). A high share means a dark, moody or "
+        "underexposed image."
+    ),
+    "Mid-tones": (
+        "The share of the picture in the middle third of the brightness "
+        "range (about 33% to 67%). Most of the detail in a normally "
+        "exposed picture sits here."
+    ),
+    "Bright areas": (
+        "The share of the picture in the brightest third of the brightness "
+        "range (about 67% to 100%). A high share means a bright, airy or "
+        "overexposed image."
+    ),
 }
+
+# Shown when hovering over the histogram chart.
+HISTOGRAM_HELP = (
+    "A histogram of the picture's brightness. Each bar shows how many "
+    "pixels have that brightness, from black on the left to white on the "
+    "right. Tall bars on the left mean a dark image and on the right a "
+    "bright one. A bar running all the way up at either end means "
+    "clipping. The faint lines mark the dark, mid and bright thirds."
+)
