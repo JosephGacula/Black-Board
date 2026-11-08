@@ -1,3 +1,4 @@
+import colorsys
 import textwrap
 
 import cv2
@@ -6,14 +7,23 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QSizePolicy, QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
-    QSlider, QSpinBox,
+    QSlider, QSpinBox, QCheckBox, QComboBox, QStackedWidget,
 )
 
-from blackboard.analyze import analyze_frame
+from blackboard.analyze import (
+    EXPOSURE_BLOWN_BGR, EXPOSURE_CRUSHED_BGR, analyze_frame, exposure_overlay,
+    hue_name,
+)
 from blackboard.decode import read_frame, DecodeError
-from blackboard.explanations import ANALYSIS_HELP, FIELD_HELP, HISTOGRAM_HELP
+from blackboard.explanations import (
+    ANALYSIS_HELP, EXPOSURE_HELP, FIELD_HELP, HISTOGRAM_HELP, PALETTE_HELP,
+    VECTORSCOPE_HELP, WAVEFORM_HELP,
+)
 from blackboard.probe import probe, ProbeError
 from blackboard.ui.histogram_view import HistogramView
+from blackboard.ui.palette_view import PaletteView
+from blackboard.ui.vectorscope_view import VectorscopeView
+from blackboard.ui.waveform_view import WaveformView
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
                "Frames", "Bitrate", "Pixel format", "Color space",
@@ -27,12 +37,18 @@ AUDIO_DETAIL_FIELDS = ["Audio codec", "Sample rate", "Channels",
 
 # Rows of the "Frame analysis" panel under the preview
 ANALYSIS_NAMES = ["Brightness", "Contrast", "Crushed blacks",
-                  "Blown highlights", "Dark areas", "Mid-tones",
-                  "Bright areas"]
+                  "Blown highlights", "Saturation", "Dark areas",
+                  "Mid-tones", "Bright areas", "Dominant hue", "Black bars"]
+
+# The charts the drop-down above the chart area can show, in order
+SCOPE_NAMES = ["Luminance histogram", "Waveform", "Color palette", "Vectorscope"]
 
 # The panel fills this many rows, then starts a new column, so it never
 # grows taller however many measurements we add.
-ANALYSIS_ROWS = 4
+ANALYSIS_ROWS = 5
+
+# Side of the little square that shows the dominant hue, in pixels
+SWATCH_SIZE = 14
 
 PREVIEW_W, PREVIEW_H = 640, 360
 
@@ -62,6 +78,51 @@ def audio_length_text(info):
     return f"Audio is {diff:.2f} s longer"
 
 
+def hue_text(degrees):
+    """Dominant hue for the panel: 'Purple (275\u00b0)', or 'None' if neutral."""
+    if degrees is None:
+        return "None (neutral)"
+    return f"{hue_name(degrees)} ({degrees:.0f}\u00b0)"
+
+
+def bars_text(bars):
+    """Black bars for the panel: 'None', 'Top/bottom 12.5 %', 'Left 5.0 %'..."""
+    if not bars.any:
+        return "None"
+
+    def pair(first, second, first_name, second_name):
+        if not first and not second:
+            return None
+        if abs(first - second) <= 1.0:                 # same on both sides
+            return f"{first_name}/{second_name} {(first + second) / 2:.1f} %"
+        parts = [f"{name} {value:.1f} %"
+                 for name, value in ((first_name, first), (second_name, second))
+                 if value]
+        return ", ".join(parts)
+
+    parts = [pair(bars.top, bars.bottom, "top", "bottom"),
+             pair(bars.left, bars.right, "left", "right")]
+    text = ", ".join(part for part in parts if part)
+    return text[0].upper() + text[1:]              # only the first word is capitalized
+
+
+def bgr_hex(color):
+    """A (B, G, R) color as '#rrggbb', for styling the legend."""
+    blue, green, red = color
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def hue_color(degrees):
+    """The hue at full strength as '#rrggbb', for the little color square.
+
+    It is always fully vivid and bright, so it stays easy to see even when
+    the frame itself is dark. (0 is red, 120 green, 240 blue.)
+    """
+    red, green, blue = colorsys.hsv_to_rgb((degrees % 360) / 360, 1.0, 1.0)
+    return "#{:02x}{:02x}{:02x}".format(
+        round(red * 255), round(green * 255), round(blue * 255))
+
+
 def last_frame_index(info):
     """Number of the video's last frame, or None if we can't tell."""
     if info.frame_count:
@@ -71,9 +132,9 @@ def last_frame_index(info):
     return None
 
 
-def frame_to_qimage(image):
-    """Shrink an OpenCV frame (a B, G, R array) to fit the preview box
-    and turn it into a QImage."""
+def shrink_for_preview(image):
+    """Shrink an OpenCV frame (a B, G, R array) to fit the preview box.
+    Never enlarges it."""
     h, w = image.shape[:2]
     scale = min(PREVIEW_W / w, PREVIEW_H / h, 1.0)
     if scale < 1.0:
@@ -81,7 +142,13 @@ def frame_to_qimage(image):
             image, (max(1, int(w * scale)), max(1, int(h * scale))),
             interpolation=cv2.INTER_AREA,
         )
-        h, w = image.shape[:2]
+    return image
+
+
+def frame_to_qimage(image):
+    """Shrink an OpenCV frame to fit the preview box and turn it into a QImage."""
+    image = shrink_for_preview(image)
+    h, w = image.shape[:2]
     qimage = QImage(image.data, w, h, image.strides[0], QImage.Format.Format_BGR888)
     return qimage.copy()   # copy, so the QImage owns its pixels
 
@@ -111,7 +178,8 @@ class FrameThread(QThread):
     """Reads one frame in the background, turns it into a QImage and
     measures it."""
     # video path, frame number, QImage, FrameStats (None if measuring failed)
-    loaded = Signal(str, int, object, object)
+    # and the QImage with exposure warnings painted on (None if that failed)
+    loaded = Signal(str, int, object, object, object)
     failed = Signal(str, int, str)      # video path, frame number, message
 
     def __init__(self, path, index, parent=None):
@@ -122,7 +190,8 @@ class FrameThread(QThread):
     def run(self):
         try:
             frame = read_frame(self.path, self.index)
-            image = frame_to_qimage(frame.image)
+            shrunk = shrink_for_preview(frame.image)
+            image = frame_to_qimage(shrunk)
         except DecodeError as e:
             self.failed.emit(self.path, self.index, str(e))
             return
@@ -135,7 +204,11 @@ class FrameThread(QThread):
             stats = analyze_frame(frame.image)
         except Exception:
             stats = None
-        self.loaded.emit(self.path, self.index, image, stats)
+        try:
+            overlay = frame_to_qimage(exposure_overlay(shrunk))
+        except Exception:
+            overlay = None
+        self.loaded.emit(self.path, self.index, image, stats, overlay)
 
 
 class MainWindow(QMainWindow):
@@ -200,12 +273,32 @@ class MainWindow(QMainWindow):
 
         self.frame_info = QLabel("")
 
+        # Optional exposure warnings painted on the preview
+        self.exposure_check = QCheckBox("Show exposure warnings")
+        self.exposure_check.setToolTip(textwrap.fill(EXPOSURE_HELP, width=55))
+        self.exposure_check.toggled.connect(self.show_current_picture)
+        self.exposure_legend = QLabel(
+            f'<span style="color:{bgr_hex(EXPOSURE_CRUSHED_BGR)}">\u25a0</span> crushed blacks'
+            f'&nbsp;&nbsp;<span style="color:{bgr_hex(EXPOSURE_BLOWN_BGR)}">\u25a0</span> blown highlights')
+        self.exposure_legend.setToolTip(textwrap.fill(EXPOSURE_HELP, width=55))
+        self.exposure_legend.hide()
+        self.normal_picture = None       # the preview as it looks
+        self.warning_picture = None      # the same with warnings painted on
+
         # --- Right, under the preview: measurements for the current frame ---
         self.analysis_title = QLabel("Frame analysis")
         self.analysis_title.setStyleSheet("font-weight: bold;")
         self.analysis_fields = {}
         self.analysis_grid = QGridLayout()
         self.analysis_grid.setHorizontalSpacing(10)
+
+        # A small square showing the dominant hue; it sits right after that
+        # row's text, and stays hidden until there is a hue to show
+        self.hue_swatch = QLabel()
+        self.hue_swatch.setFixedSize(SWATCH_SIZE, SWATCH_SIZE)
+        self.hue_swatch.setToolTip(textwrap.fill(ANALYSIS_HELP["Dominant hue"], width=55))
+        self.hue_swatch.hide()
+
         for i, name in enumerate(ANALYSIS_NAMES):
             # Hovering over either the name or the value shows an explanation
             tip = textwrap.fill(ANALYSIS_HELP[name], width=55)
@@ -219,8 +312,20 @@ class MainWindow(QMainWindow):
             # and a gap before the next column
             row, column = i % ANALYSIS_ROWS, i // ANALYSIS_ROWS * 3
             self.analysis_grid.addWidget(name_label, row, column)
-            self.analysis_grid.addWidget(value_label, row, column + 1)
+            if name == "Dominant hue":
+                # The text and the color square share one cell
+                self.hue_cell = QWidget()
+                cell_layout = QHBoxLayout(self.hue_cell)
+                cell_layout.setContentsMargins(0, 0, 0, 0)
+                cell_layout.setSpacing(6)
+                cell_layout.addWidget(value_label)
+                cell_layout.addWidget(self.hue_swatch)
+                cell_layout.addStretch()
+                self.analysis_grid.addWidget(self.hue_cell, row, column + 1)
+            else:
+                self.analysis_grid.addWidget(value_label, row, column + 1)
             self.analysis_grid.setColumnMinimumWidth(column + 2, 28)
+
         # Spare width goes to the right, so the columns stay together
         last_column = (len(ANALYSIS_NAMES) - 1) // ANALYSIS_ROWS * 3 + 2
         self.analysis_grid.setColumnStretch(last_column, 1)
@@ -228,11 +333,34 @@ class MainWindow(QMainWindow):
         # The brightness histogram sits beside the numbers, with its own
         # heading so it lines up with "Frame analysis" on the left
         histogram_tip = textwrap.fill(HISTOGRAM_HELP, width=55)
-        self.histogram_title = QLabel("Luminance histogram")
-        self.histogram_title.setStyleSheet("font-weight: bold;")
-        self.histogram_title.setToolTip(histogram_tip)
+        waveform_tip = textwrap.fill(WAVEFORM_HELP, width=55)
         self.histogram_view = HistogramView()
         self.histogram_view.setToolTip(histogram_tip)
+        self.waveform_view = WaveformView()
+        self.waveform_view.setToolTip(waveform_tip)
+        palette_tip_text = textwrap.fill(PALETTE_HELP, width=55)
+        self.palette_view = PaletteView()
+        self.palette_view.set_help(palette_tip_text)
+        vectorscope_tip = textwrap.fill(VECTORSCOPE_HELP, width=55)
+        self.vectorscope_view = VectorscopeView()
+        self.vectorscope_view.setToolTip(vectorscope_tip)
+
+        # One chart area, with a drop-down above it to pick which chart
+        self.scope_stack = QStackedWidget()
+        self.scope_stack.addWidget(self.histogram_view)
+        self.scope_stack.addWidget(self.waveform_view)
+        self.scope_stack.addWidget(self.palette_view)
+        self.scope_stack.addWidget(self.vectorscope_view)
+        self.scope_stack.setFixedHeight(self.histogram_view.height())
+        self.scope_selector = QComboBox()
+        self.scope_selector.addItems(SCOPE_NAMES)
+        self.scope_selector.setStyleSheet("font-weight: bold;")
+        self.scope_tips = [histogram_tip, waveform_tip, palette_tip_text,
+                           vectorscope_tip]
+        for position, tip in enumerate(self.scope_tips):
+            self.scope_selector.setItemData(position, tip, Qt.ItemDataRole.ToolTipRole)
+        self.scope_selector.setToolTip(histogram_tip)
+        self.scope_selector.currentIndexChanged.connect(self.on_scope_changed)
 
         numbers_column = QVBoxLayout()
         numbers_column.addWidget(self.analysis_title)
@@ -240,8 +368,8 @@ class MainWindow(QMainWindow):
         numbers_column.addStretch()
 
         histogram_column = QVBoxLayout()
-        histogram_column.addWidget(self.histogram_title)
-        histogram_column.addWidget(self.histogram_view)
+        histogram_column.addWidget(self.scope_selector)
+        histogram_column.addWidget(self.scope_stack)
         histogram_column.addStretch()
 
         analysis_row = QHBoxLayout()
@@ -258,7 +386,12 @@ class MainWindow(QMainWindow):
         preview_column = QVBoxLayout()
         preview_column.addWidget(self.preview)
         preview_column.addLayout(slider_row)
-        preview_column.addWidget(self.frame_info)
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.frame_info)
+        info_row.addStretch()
+        info_row.addWidget(self.exposure_legend)
+        info_row.addWidget(self.exposure_check)
+        preview_column.addLayout(info_row)
         preview_column.addSpacing(8)
         preview_column.addLayout(analysis_row)
         preview_column.addStretch()
@@ -369,18 +502,44 @@ class MainWindow(QMainWindow):
         self.preview.clear()
         self.preview.setText("Open a video to see its frames")
         self.frame_info.setText("")
+        self.normal_picture = None
+        self.warning_picture = None
+        self.exposure_check.setEnabled(False)
+        self.exposure_legend.hide()
         self.clear_analysis()
+
+    def set_hue_swatch(self, degrees):
+        """Show the little color square for this hue, or hide it for None."""
+        if degrees is None:
+            self.hue_swatch.hide()
+            return
+        self.hue_swatch.setStyleSheet(
+            f"background-color: {hue_color(degrees)}; border: 1px solid #888888;")
+        self.hue_swatch.show()
+
+    def on_scope_changed(self, position):
+        """Show the chart picked in the drop-down."""
+        self.scope_stack.setCurrentIndex(position)
+        self.scope_selector.setToolTip(self.scope_tips[position])
 
     def clear_analysis(self):
         for label in self.analysis_fields.values():
             label.setText("-")
         self.histogram_view.set_histogram(None)
+        self.waveform_view.set_waveform(None)
+        self.palette_view.set_palette(None)
+        self.vectorscope_view.set_vectorscope(None)
+        self.set_hue_swatch(None)
 
     def show_analysis(self, stats):
         if stats is None:
             for label in self.analysis_fields.values():
                 label.setText("unavailable")
             self.histogram_view.set_histogram(None)
+            self.waveform_view.set_waveform(None)
+            self.palette_view.set_palette(None)
+            self.vectorscope_view.set_vectorscope(None)
+            self.set_hue_swatch(None)
             return
         self.analysis_fields["Brightness"].setText(f"{stats.brightness:.1f} %")
         self.analysis_fields["Contrast"].setText(f"{stats.contrast:.1f} %")
@@ -389,7 +548,14 @@ class MainWindow(QMainWindow):
         self.analysis_fields["Dark areas"].setText(f"{stats.dark_share:.1f} %")
         self.analysis_fields["Mid-tones"].setText(f"{stats.mid_share:.1f} %")
         self.analysis_fields["Bright areas"].setText(f"{stats.bright_share:.1f} %")
+        self.analysis_fields["Saturation"].setText(f"{stats.saturation:.1f} %")
+        self.analysis_fields["Dominant hue"].setText(hue_text(stats.dominant_hue))
+        self.set_hue_swatch(stats.dominant_hue)
+        self.analysis_fields["Black bars"].setText(bars_text(stats.black_bars))
         self.histogram_view.set_histogram(stats.histogram)
+        self.waveform_view.set_waveform(stats.waveform)
+        self.palette_view.set_palette(stats.palette)
+        self.vectorscope_view.set_vectorscope(stats.vectorscope)
 
     def setup_preview(self, info):
         last = last_frame_index(info)
@@ -408,6 +574,7 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         self.frame_slider.setEnabled(True)
         self.frame_spin.setEnabled(True)
+        self.exposure_check.setEnabled(True)
         self.update_frame_label(0)
         self.preview.setText("Loading frame...")
         self.request_frame()
@@ -446,16 +613,31 @@ class MainWindow(QMainWindow):
         if self.info is not None and self.wanted_index != self.last_requested:
             self.start_frame_thread()
 
-    def on_frame_loaded(self, path, index, image, stats):
+    def on_frame_loaded(self, path, index, image, stats, overlay=None):
         if path != self.current_path:
             return   # a late result for a video that is no longer open
-        self.preview.setPixmap(QPixmap.fromImage(image))
+        self.normal_picture = QPixmap.fromImage(image)
+        self.warning_picture = None if overlay is None else QPixmap.fromImage(overlay)
+        self.show_current_picture()
         self.show_analysis(stats)
+
+    def show_current_picture(self):
+        """Show the preview, with exposure warnings if the box is ticked."""
+        warnings_on = self.exposure_check.isChecked()
+        self.exposure_legend.setVisible(warnings_on and self.normal_picture is not None)
+        if self.normal_picture is None:
+            return
+        use_warnings = warnings_on and self.warning_picture is not None
+        self.preview.setPixmap(self.warning_picture if use_warnings
+                               else self.normal_picture)
 
     def on_frame_failed(self, path, index, message):
         if path != self.current_path:
             return
         self.clear_analysis()
+        self.normal_picture = None
+        self.warning_picture = None
+        self.exposure_legend.hide()
         self.preview.clear()
         self.preview.setText(f"Could not read frame {index}.\n{message}")
 

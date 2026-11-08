@@ -137,6 +137,30 @@ ANALYSIS_HELP = {
         "range (about 67% to 100%). A high share means a bright, airy or "
         "overexposed image."
     ),
+    "Saturation": (
+        "How strong the colors are, from 0% (black and white, no color at "
+        "all) to 100% (fully vivid). Gray and white areas count as 0%, so a "
+        "mostly gray picture scores low even if it has a bright spot of "
+        "color. Very dark areas are left out, because the color there is "
+        "mostly camera noise."
+    ),
+    "Dominant hue": (
+        "The most common color in the picture, such as red, green or blue, "
+        "with its position on the color wheel in degrees (red is 0, green "
+        "120, blue 240). Only areas with a clear color vote, so gray, black "
+        "and white are ignored. It says None if the picture has almost no "
+        "color."
+    ),
+    "Black bars": (
+        "Solid black bars along the edges of the picture: at the top and "
+        "bottom (letterbox, common with widescreen film) or at the sides "
+        "(pillarbox, common with tall phone video on a wide screen). Each "
+        "number is how thick the bar is as a share of the picture's height "
+        "or width. It says None if there are no bars. The other "
+        "measurements here leave the bars out, so they describe the "
+        "picture itself. A very dark scene with pure black edges can look "
+        "like bars."
+    ),
 }
 
 # Shown when hovering over the histogram chart.
@@ -145,5 +169,52 @@ HISTOGRAM_HELP = (
     "pixels have that brightness, from black on the left to white on the "
     "right. Tall bars on the left mean a dark image and on the right a "
     "bright one. A bar running all the way up at either end means "
-    "clipping. The faint lines mark the dark, mid and bright thirds."
+    "clipping. The faint lines mark the dark, mid and bright thirds. "
+    "Black bars around the picture are left out."
+)
+
+# Shown when hovering over the exposure warnings checkbox and its legend.
+EXPOSURE_HELP = (
+    "Paints the parts of the picture where detail is lost. Blue marks "
+    "crushed blacks: areas that are pure black or very close to it. Red "
+    "marks blown highlights: areas that are pure white or very close to "
+    "it. These are the same pixels counted in the Crushed blacks and Blown "
+    "highlights numbers. Black bars around the picture are not painted."
+)
+
+# Shown when hovering over the waveform.
+WAVEFORM_HELP = (
+    "Shows how bright the picture is at each position across its width. "
+    "The left edge of the graph is the left edge of the picture and the "
+    "right edge is the right edge. Up is brighter: the bottom is pure "
+    "black and the top is pure white, with lines at 25%, 50% and 75%. "
+    "Each column of the graph is a brightness histogram for that part of "
+    "the picture, and the brighter the trace, the more of the picture "
+    "sits at that level. A bright window on the right shows up as a "
+    "bright patch at the top right. Black bars around the picture are "
+    "left out."
+)
+
+# Shown when hovering over the vectorscope.
+VECTORSCOPE_HELP = (
+    "Shows which colors are in the picture and how strong they are. "
+    "Every pixel is placed on a color map: gray and white land in the "
+    "middle, and the more vivid a color is, the farther from the middle "
+    "it sits. The direction tells you the color. The six small colored "
+    "boxes mark where pure red, yellow, green, cyan, blue and magenta "
+    "would land. A cloud leaning toward one box means the picture has a "
+    "color cast. A tight blob in the middle means muted colors or black "
+    "and white. The brighter the trace, the more pixels sit there. Black "
+    "bars around the picture are left out."
+)
+
+# Shown when hovering over the color palette.
+PALETTE_HELP = (
+    "The main colors of the picture, found by grouping similar-looking "
+    "pixels together and averaging each group. Each tile shows one color "
+    "with its share of the picture, biggest first. The thin strip along "
+    "the bottom is split by those shares, so you can see how much of the "
+    "picture each color really covers. Black bars around the picture are "
+    "left out. A picture with only a few different colors shows fewer "
+    "than five."
 )
