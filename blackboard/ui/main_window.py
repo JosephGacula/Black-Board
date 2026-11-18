@@ -14,14 +14,22 @@ from blackboard.analyze import (
     EXPOSURE_BLOWN_BGR, EXPOSURE_CRUSHED_BGR, analyze_frame, exposure_overlay,
     hue_name,
 )
+from blackboard.barcode import barcode_columns, brightness_colors, build_barcode
 from blackboard.decode import read_frame, DecodeError
 from blackboard.explanations import (
-    ANALYSIS_HELP, EXPOSURE_HELP, FIELD_HELP, HISTOGRAM_HELP, PALETTE_HELP,
-    VECTORSCOPE_HELP, WAVEFORM_HELP,
+    ANALYSIS_HELP, BARCODE_HELP, BRIGHTNESS_BARCODE_HELP, EXPOSURE_HELP, MOTION_HELP, FIELD_HELP, HISTOGRAM_HELP, PALETTE_HELP,
+    PLATFORM_HELP, SEGMENT_HELP, SHOTS_HELP, VECTORSCOPE_HELP, WAVEFORM_HELP,
 )
+from blackboard.motion import build_motion, motion_colors, summarize_motion
+from blackboard.platforms import DEFAULT_KEYS, clip_from, find_bars, with_bars
 from blackboard.probe import probe, ProbeError
+from blackboard.shots import detect_segment_shots
+from blackboard.ui.barcode_view import BarcodeView
 from blackboard.ui.histogram_view import HistogramView
 from blackboard.ui.palette_view import PaletteView
+from blackboard.ui.platform_dialog import PlatformDialog
+from blackboard.ui.segment_picker import SegmentBand, SegmentPicker
+from blackboard.ui.shot_list import ShotListView
 from blackboard.ui.vectorscope_view import VectorscopeView
 from blackboard.ui.waveform_view import WaveformView
 
@@ -51,6 +59,14 @@ ANALYSIS_ROWS = 5
 SWATCH_SIZE = 14
 
 PREVIEW_W, PREVIEW_H = 640, 360
+
+# Text of the button that starts the color barcode analysis, and of the same
+# button while the analysis runs
+ANALYZE_TEXT = "Analyze color barcode"
+CANCEL_TEXT = "Cancel"
+SHOTS_TEXT = "Detect shots"
+MOTION_TEXT = "Analyze motion"
+PLATFORMS_TEXT = "Check platforms"
 
 
 def fmt(value, template="{}"):
@@ -104,6 +120,21 @@ def bars_text(bars):
              pair(bars.left, bars.right, "left", "right")]
     text = ", ".join(part for part in parts if part)
     return text[0].upper() + text[1:]              # only the first word is capitalized
+
+
+def motion_text(summary):
+    """The line under the motion strip."""
+    text = (f"Motion: average {summary.average:.1f} % of the picture width per second, "
+            f"busiest {summary.peak:.1f} at frame {summary.peak_frame}, "
+            f"calmest {summary.calmest:.1f} at frame {summary.calmest_frame}")
+    if summary.skipped:
+        cuts = "a cut" if summary.skipped == 1 else f"{summary.skipped} cuts"
+        text += f" ({cuts} left out)"
+    if summary.rough:
+        share = round(summary.rough / summary.measured * 100)
+        text += (f". {share} % of the strip, shown washed out, is a rough estimate: "
+                 f"the footage changes too much between frames to follow")
+    return text
 
 
 def bgr_hex(color):
@@ -211,16 +242,146 @@ class FrameThread(QThread):
         self.loaded.emit(self.path, self.index, image, stats, overlay)
 
 
+class BarsThread(QThread):
+    """Looks for black bars baked into the picture, in frames across the video."""
+    found = Signal(str, object)         # video path, Bars (None if it could not tell)
+
+    def __init__(self, path, frame_count, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.frame_count = frame_count
+
+    def run(self):
+        self.setPriority(QThread.Priority.LowPriority)
+        try:
+            bars = find_bars(self.path, self.frame_count,
+                             should_stop=self.isInterruptionRequested)
+        except Exception:
+            bars = None
+        if not self.isInterruptionRequested():
+            self.found.emit(self.path, bars)
+
+
+class BarcodeThread(QThread):
+    """Measures the stripes of the color barcode of one segment in the
+    background.
+
+    Every signal carries a generation number, so the window can tell results
+    for the video that is open now from late ones for a video it has left.
+    """
+    updated = Signal(int, object)     # generation, the stripes measured so far
+    done = Signal(int, object)        # generation, all the stripes
+    failed = Signal(int, str)         # generation, an error message
+
+    def __init__(self, generation, path, first, last, parent=None):
+        super().__init__(parent)
+        self.generation = generation
+        self.path = path
+        self.first = first
+        self.last = last
+
+    def run(self):
+        try:
+            colors = build_barcode(
+                self.path, self.first, self.last,
+                on_update=lambda found: self.updated.emit(self.generation, found),
+                should_stop=self.isInterruptionRequested,
+            )
+        except DecodeError as e:
+            self.failed.emit(self.generation, str(e))
+        except Exception as e:
+            self.failed.emit(self.generation, f"Unexpected error: {e}")
+        else:
+            if not self.isInterruptionRequested():
+                self.done.emit(self.generation, colors)
+
+
+class ShotThread(QThread):
+    """Finds the shots of one segment in the background.
+
+    Like the barcode thread, every signal carries a generation number so
+    late results for an older run are recognized.
+    """
+    progress = Signal(int, int)       # generation, percent done
+    done = Signal(int, object)        # generation, a SegmentShots
+    failed = Signal(int, str)         # generation, an error message
+
+    def __init__(self, generation, path, first, last, fps, parent=None):
+        super().__init__(parent)
+        self.generation = generation
+        self.path = path
+        self.first = first
+        self.last = last
+        self.fps = fps
+
+    def run(self):
+        try:
+            result = detect_segment_shots(
+                self.path, self.first, self.last, self.fps,
+                on_progress=lambda percent: self.progress.emit(self.generation, percent),
+                should_stop=self.isInterruptionRequested,
+            )
+        except DecodeError as e:
+            self.failed.emit(self.generation, str(e))
+        except Exception as e:
+            self.failed.emit(self.generation, f"Unexpected error: {e}")
+        else:
+            if result is not None and not self.isInterruptionRequested():
+                self.done.emit(self.generation, result)
+
+
+class MotionThread(QThread):
+    """Measures the motion strip of one segment in the background."""
+    updated = Signal(int, object)     # generation, the values so far
+    done = Signal(int, object)        # generation, a MotionData
+    failed = Signal(int, str)         # generation, an error message
+
+    def __init__(self, generation, path, first, last, fps, parent=None):
+        super().__init__(parent)
+        self.generation = generation
+        self.path = path
+        self.first = first
+        self.last = last
+        self.fps = fps
+
+    def run(self):
+        try:
+            data = build_motion(
+                self.path, self.first, self.last, self.fps,
+                on_update=lambda found: self.updated.emit(self.generation, found),
+                should_stop=self.isInterruptionRequested,
+            )
+        except DecodeError as e:
+            self.failed.emit(self.generation, str(e))
+        except Exception as e:
+            self.failed.emit(self.generation, f"Unexpected error: {e}")
+        else:
+            if not self.isInterruptionRequested():
+                self.done.emit(self.generation, data)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Black Board")
-        self.resize(1000, 700)
+        self.resize(1000, 900)
 
         self.probe_thread = None
         self.frame_thread = None
+        self.barcode_thread = None
+        self.barcode_generation = 0   # which barcode run we are waiting for
+        self.barcode_running = False
+        self.shots_thread = None
+        self.shots_generation = 0     # which shot detection run we are waiting for
+        self.shots_running = False
+        self.motion_thread = None
+        self.motion_generation = 0    # which motion run we are waiting for
+        self.motion_running = False
+        self.motion_frames = []       # the frame behind each stripe of the motion strip
         self.current_path = ""
         self.info = None          # the VideoInfo of the open video
+        self.platform_choices = list(DEFAULT_KEYS)   # places picked in the platform window
+        self.bars_found = {}      # video path -> the black bars found in it (or None)
         self.wanted_index = 0     # the frame the user is asking for
         self.last_requested = -1  # the frame we most recently started loading
 
@@ -270,6 +431,65 @@ class MainWindow(QMainWindow):
         self.frame_slider.valueChanged.connect(self.frame_spin.setValue)
         self.frame_spin.valueChanged.connect(self.frame_slider.setValue)
         self.frame_spin.valueChanged.connect(self.on_frame_changed)
+
+        # Choosing a segment: boxes for where it starts and ends, and a band
+        # under the slider that lights up the chosen stretch
+        segment_tip = textwrap.fill(SEGMENT_HELP, width=55)
+        self.segment_band = SegmentBand()
+        self.segment_band.setToolTip(segment_tip)
+        self.segment_picker = SegmentPicker()
+        self.segment_picker.setToolTip(segment_tip)
+        self.segment_picker.changed.connect(self.segment_band.set_segment)
+        self.segment_picker.start_from_current.connect(self.use_current_as_start)
+        self.segment_picker.end_from_current.connect(self.use_current_as_end)
+
+        # Analyzing the segment's colors is a separate step the user starts
+        self.analyze_button = QPushButton(ANALYZE_TEXT)
+        self.analyze_button.setToolTip(textwrap.fill(BARCODE_HELP, width=55))
+        self.analyze_button.clicked.connect(self.on_analyze_clicked)
+        self.barcode_status = QLabel("")
+
+        # Measuring the motion of the segment is a third step
+        motion_tip = textwrap.fill(MOTION_HELP, width=55)
+        self.motion_button = QPushButton(MOTION_TEXT)
+        self.motion_button.setToolTip(motion_tip)
+        self.motion_button.clicked.connect(self.on_motion_clicked)
+        self.motion_view = BarcodeView()
+        self.motion_view.setToolTip(motion_tip)
+        self.motion_view.seek_requested.connect(self.frame_spin.setValue)
+        self.motion_status = QLabel("")
+        self.motion_status.setWordWrap(True)      # the line can be long
+        self.motion_status.setMinimumWidth(100)
+        self.motion_status.setToolTip(motion_tip)
+
+        # Checking how well the video suits the places it will be posted. This
+        # only reads the file's facts, so it is instant and never blocks anything.
+        platform_tip = textwrap.fill(PLATFORM_HELP, width=55)
+        self.platforms_button = QPushButton(PLATFORMS_TEXT)
+        self.platforms_button.setToolTip(platform_tip)
+        self.platforms_button.clicked.connect(self.on_platforms_clicked)
+
+        # Finding the shots (cuts) of the segment is another step the user starts
+        shots_tip = textwrap.fill(SHOTS_HELP, width=55)
+        self.shots_button = QPushButton(SHOTS_TEXT)
+        self.shots_button.setToolTip(shots_tip)
+        self.shots_button.clicked.connect(self.on_shots_clicked)
+        self.shots_title = QLabel("Shots")
+        self.shots_title.setStyleSheet("font-weight: bold;")
+        self.shots_title.setToolTip(shots_tip)
+        self.shot_list = ShotListView()
+        self.shot_list.setToolTip(shots_tip)
+        self.shot_list.seek_requested.connect(self.frame_spin.setValue)
+
+        # The segment as a strip of color
+        self.barcode_view = BarcodeView()
+        self.barcode_view.setToolTip(textwrap.fill(BARCODE_HELP, width=55))
+        self.barcode_view.seek_requested.connect(self.frame_spin.setValue)
+
+        # The same stripes as gray: how bright each moment is
+        self.brightness_view = BarcodeView()
+        self.brightness_view.setToolTip(textwrap.fill(BRIGHTNESS_BARCODE_HELP, width=55))
+        self.brightness_view.seek_requested.connect(self.frame_spin.setValue)
 
         self.frame_info = QLabel("")
 
@@ -379,13 +599,29 @@ class MainWindow(QMainWindow):
 
         self.clear_preview()
 
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(self.frame_slider)
-        slider_row.addWidget(self.frame_spin)
+        # The band sits right under the slider and is as wide as it is
+        slider_grid = QGridLayout()
+        slider_grid.setVerticalSpacing(2)
+        slider_grid.addWidget(self.frame_slider, 0, 0)
+        slider_grid.addWidget(self.frame_spin, 0, 1)
+        slider_grid.addWidget(self.segment_band, 1, 0)
+
+        analyze_row = QHBoxLayout()
+        analyze_row.addWidget(self.analyze_button)
+        analyze_row.addWidget(self.shots_button)
+        analyze_row.addWidget(self.motion_button)
+        analyze_row.addWidget(self.platforms_button)
+        analyze_row.addWidget(self.barcode_status, 1)
 
         preview_column = QVBoxLayout()
         preview_column.addWidget(self.preview)
-        preview_column.addLayout(slider_row)
+        preview_column.addLayout(slider_grid)
+        preview_column.addWidget(self.segment_picker)
+        preview_column.addLayout(analyze_row)
+        preview_column.addWidget(self.barcode_view)
+        preview_column.addWidget(self.brightness_view)
+        preview_column.addWidget(self.motion_view)
+        preview_column.addWidget(self.motion_status)
         info_row = QHBoxLayout()
         info_row.addWidget(self.frame_info)
         info_row.addStretch()
@@ -396,8 +632,16 @@ class MainWindow(QMainWindow):
         preview_column.addLayout(analysis_row)
         preview_column.addStretch()
 
+        # The shot list sits on the left, under the video's technical details
+        left_column = QVBoxLayout()
+        left_column.addLayout(form)
+        left_column.addSpacing(12)
+        left_column.addWidget(self.shots_title)
+        left_column.addWidget(self.shot_list)
+        left_column.addStretch()
+
         body = QHBoxLayout()
-        body.addLayout(form)
+        body.addLayout(left_column)
         body.addLayout(preview_column)
 
         layout = QVBoxLayout()
@@ -506,6 +750,22 @@ class MainWindow(QMainWindow):
         self.warning_picture = None
         self.exposure_check.setEnabled(False)
         self.exposure_legend.hide()
+        self.stop_barcode()
+        self.segment_picker.clear()
+        self.segment_band.clear()
+        self.barcode_view.clear("Open a video to see its color barcode")
+        self.brightness_view.clear("Open a video to see its brightness barcode")
+        self.barcode_status.setText("")
+        self.stop_shots()
+        self.shot_list.clear("Open a video to find its shots")
+        self.stop_motion()
+        self.motion_view.clear("Open a video to see its motion")
+        self.motion_status.setText("")
+        self.motion_frames = []
+        self.shots_running = False
+        self.barcode_running = False
+        self.motion_running = False
+        self.refresh_controls()
         self.clear_analysis()
 
     def set_hue_swatch(self, degrees):
@@ -579,6 +839,284 @@ class MainWindow(QMainWindow):
         self.preview.setText("Loading frame...")
         self.request_frame()
 
+        # The whole video is selected to begin with; nothing is analyzed
+        # until the user presses the button
+        self.segment_picker.set_video(last + 1, self.info.fps)
+        self.segment_band.set_total(last + 1)
+        self.barcode_view.clear("Choose a segment, then press Analyze")
+        self.brightness_view.clear("The brightness barcode appears with the color barcode")
+        self.barcode_status.setText("")
+        self.shot_list.clear("Press Detect shots to find the cuts")
+        self.motion_view.clear("Press Analyze motion to measure it")
+        self.motion_status.setText("")
+        self.motion_frames = []
+        self.refresh_controls()
+
+    # ---------- choosing a segment and analyzing its color barcode ----------
+
+    def use_current_as_start(self):
+        if self.info is not None:
+            self.segment_picker.set_first(self.wanted_index)
+
+    def use_current_as_end(self):
+        if self.info is not None:
+            self.segment_picker.set_last(self.wanted_index)
+
+    def on_analyze_clicked(self):
+        """The one button: start the analysis, or cancel it while it runs."""
+        if self.barcode_running:
+            self.cancel_barcode()
+        elif self.info is not None:
+            first, last = self.segment_picker.segment()
+            self.start_barcode(first, last)
+
+    def start_barcode(self, first, last):
+        """Start measuring the barcode of frames first..last in the background."""
+        self.stop_barcode()
+        total = barcode_columns(first, last)
+        self.barcode_view.begin(first, last, total, "Building the color barcode...")
+        self.barcode_view.set_position(self.wanted_index)
+        self.brightness_view.begin(first, last, total, "Building the brightness barcode...")
+        self.brightness_view.set_position(self.wanted_index)
+        self.barcode_running = True
+        self.refresh_controls()                     # the segment stays put meanwhile
+        self.barcode_status.setText(f"Analyzing frames {first} to {last}...")
+        thread = BarcodeThread(self.barcode_generation, self.current_path,
+                               first, last, self)
+        thread.updated.connect(self.on_barcode_updated)
+        thread.done.connect(self.on_barcode_done)
+        thread.failed.connect(self.on_barcode_failed)
+        self.barcode_thread = thread
+        # Low priority, so the slider and the preview stay quick meanwhile
+        thread.start(QThread.Priority.LowPriority)
+
+    def stop_barcode(self):
+        """Stop any barcode being measured. Its late results are ignored."""
+        self.barcode_generation += 1
+        if self.barcode_thread is not None and self.barcode_thread.isRunning():
+            self.barcode_thread.requestInterruption()
+
+    def cancel_barcode(self):
+        """The user pressed Cancel: drop the half-finished barcode."""
+        self.stop_barcode()
+        self.end_barcode_run()
+        self.barcode_view.clear("Cancelled. Press Analyze to build it.")
+        self.brightness_view.clear("Cancelled. Press Analyze to build it.")
+        self.barcode_status.setText("Cancelled")
+
+    def end_barcode_run(self):
+        """Go back to the state where a new analysis can be started."""
+        self.barcode_running = False
+        self.refresh_controls()
+
+    def refresh_controls(self):
+        """Switch the segment boxes and the three buttons on or off. Only one
+        analysis runs at a time, because all of them read the video."""
+        is_open = self.info is not None
+        running = {"barcode": self.barcode_running, "shots": self.shots_running,
+                   "motion": self.motion_running}
+
+        def free_for(name):
+            return is_open and not any(on for key, on in running.items() if key != name)
+
+        self.segment_picker.setEnabled(is_open and not any(running.values()))
+        self.analyze_button.setEnabled(free_for("barcode"))
+        self.shots_button.setEnabled(free_for("shots"))
+        self.motion_button.setEnabled(free_for("motion"))
+        self.platforms_button.setEnabled(is_open)
+        self.analyze_button.setText(CANCEL_TEXT if self.barcode_running else ANALYZE_TEXT)
+        self.shots_button.setText(CANCEL_TEXT if self.shots_running else SHOTS_TEXT)
+        self.motion_button.setText(CANCEL_TEXT if self.motion_running else MOTION_TEXT)
+
+    # ---------- how well the video suits the places it will be posted ----------
+
+    def on_platforms_clicked(self):
+        """Open the window where the user picks places and sees the verdicts.
+        Looking for black bars reads some frames, so it runs in the background
+        and the window updates itself when it is done."""
+        if self.info is None:
+            return
+        path = self.current_path
+        clip = clip_from(path, self.info)
+        known = path in self.bars_found
+        if known:
+            clip = with_bars(clip, self.bars_found[path])
+        dialog = PlatformDialog(clip, self.platform_choices, self,
+                                help_text=textwrap.fill(PLATFORM_HELP, width=55),
+                                searching=not known)
+        thread = None
+        frames = last_frame_index(self.info)
+        if not known and frames is not None:
+            thread = BarsThread(path, frames + 1, self)
+            thread.found.connect(lambda found_path, bars:
+                                 self.on_bars_found(dialog, clip, found_path, bars))
+            thread.start()
+        elif not known:
+            dialog.search_failed()
+        dialog.exec()
+        if thread is not None:
+            thread.requestInterruption()
+            thread.wait()
+        self.platform_choices = dialog.selected_keys()     # remembered while the app runs
+
+    def on_bars_found(self, dialog, clip, path, bars):
+        self.bars_found[path] = bars
+        if bars is None:
+            dialog.search_failed()
+        else:
+            dialog.set_clip(with_bars(clip, bars))
+
+    # ---------- measuring the motion of the segment ----------
+
+    def on_motion_clicked(self):
+        """The one button: start measuring motion, or cancel while it runs."""
+        if self.motion_running:
+            self.cancel_motion()
+        elif self.info is not None:
+            first, last = self.segment_picker.segment()
+            self.start_motion(first, last)
+
+    def start_motion(self, first, last):
+        """Start measuring the motion of frames first..last in the background."""
+        self.stop_motion()
+        if last <= first:
+            self.motion_view.clear("Motion needs a segment of at least two frames")
+            self.motion_status.setText("")
+            return
+        total = barcode_columns(first, last)
+        self.motion_view.begin(first, last, total, "Measuring the motion...")
+        self.motion_view.set_position(self.wanted_index)
+        self.motion_status.setText("")
+        self.motion_running = True
+        self.refresh_controls()
+        thread = MotionThread(self.motion_generation, self.current_path,
+                              first, last, self.info.fps, self)
+        thread.updated.connect(self.on_motion_updated)
+        thread.done.connect(self.on_motion_done)
+        thread.failed.connect(self.on_motion_failed)
+        self.motion_thread = thread
+        thread.start(QThread.Priority.LowPriority)
+
+    def stop_motion(self):
+        """Stop any motion measurement. Its late results are ignored."""
+        self.motion_generation += 1
+        if self.motion_thread is not None and self.motion_thread.isRunning():
+            self.motion_thread.requestInterruption()
+
+    def cancel_motion(self):
+        self.stop_motion()
+        self.motion_running = False
+        self.refresh_controls()
+        self.motion_view.clear("Cancelled. Press Analyze motion to measure it.")
+        self.motion_status.setText("")
+
+    def on_motion_updated(self, generation, values):
+        if generation == self.motion_generation:
+            self.motion_view.set_colors(motion_colors(values))
+            self.motion_status.setText(
+                f"Measuring the motion: {len(values)} of {self.motion_view.total} stripes")
+
+    def on_motion_done(self, generation, data):
+        if generation == self.motion_generation:
+            self.motion_running = False
+            self.refresh_controls()
+            self.motion_frames = list(data.frames)
+            self.motion_view.set_colors(motion_colors(data.values, rough=data.rough))
+            try:
+                summary = summarize_motion(data)
+            except ValueError:
+                self.motion_status.setText("No motion could be measured in this segment")
+                return
+            self.motion_status.setText(motion_text(summary))
+
+    def on_motion_failed(self, generation, message):
+        if generation == self.motion_generation:
+            self.motion_running = False
+            self.refresh_controls()
+            self.motion_view.set_message("The motion is not available for this segment")
+            self.motion_status.setText("")
+
+    # ---------- finding the shots of the segment ----------
+
+    def on_shots_clicked(self):
+        """The one button: start finding shots, or cancel while it runs."""
+        if self.shots_running:
+            self.cancel_shots()
+        elif self.info is not None:
+            first, last = self.segment_picker.segment()
+            self.start_shots(first, last)
+
+    def start_shots(self, first, last):
+        """Start finding the shots of frames first..last in the background."""
+        self.stop_shots()
+        self.segment_band.set_cuts([])
+        self.shot_list.clear("Looking for cuts... 0 %")
+        self.shots_running = True
+        self.refresh_controls()
+        thread = ShotThread(self.shots_generation, self.current_path,
+                            first, last, self.info.fps, self)
+        thread.progress.connect(self.on_shots_progress)
+        thread.done.connect(self.on_shots_done)
+        thread.failed.connect(self.on_shots_failed)
+        self.shots_thread = thread
+        thread.start(QThread.Priority.LowPriority)
+
+    def stop_shots(self):
+        """Stop any shot detection. Its late results are ignored."""
+        self.shots_generation += 1
+        if self.shots_thread is not None and self.shots_thread.isRunning():
+            self.shots_thread.requestInterruption()
+
+    def cancel_shots(self):
+        self.stop_shots()
+        self.shots_running = False
+        self.refresh_controls()
+        self.shot_list.clear("Cancelled. Press Detect shots to try again.")
+
+    def on_shots_progress(self, generation, percent):
+        if generation == self.shots_generation:
+            self.shot_list.set_message(f"Looking for cuts... {percent} %")
+
+    def on_shots_done(self, generation, result):
+        if generation == self.shots_generation:
+            self.shots_running = False
+            self.refresh_controls()
+            self.shot_list.set_shots(result.shots, result.summary,
+                                     result.first, result.last)
+            self.shot_list.set_position(self.wanted_index)
+            self.segment_band.set_cuts(result.cuts)
+
+    def on_shots_failed(self, generation, message):
+        if generation == self.shots_generation:
+            self.shots_running = False
+            self.refresh_controls()
+            self.shot_list.clear("The shots could not be found for this segment")
+
+    def on_barcode_updated(self, generation, colors):
+        if generation == self.barcode_generation:
+            self.barcode_view.set_colors(colors)
+            self.brightness_view.set_colors(brightness_colors(colors))
+            self.barcode_status.setText(
+                f"Analyzing frames {self.barcode_view.first_frame} to "
+                f"{self.barcode_view.last_frame}: {len(colors)} of "
+                f"{self.barcode_view.total} stripes")
+
+    def on_barcode_done(self, generation, colors):
+        if generation == self.barcode_generation:
+            self.barcode_view.set_colors(colors)
+            self.brightness_view.set_colors(brightness_colors(colors))
+            self.end_barcode_run()
+            self.barcode_status.setText(
+                f"Color barcode of frames {self.barcode_view.first_frame} to "
+                f"{self.barcode_view.last_frame}")
+
+    def on_barcode_failed(self, generation, message):
+        if generation == self.barcode_generation:
+            self.end_barcode_run()
+            self.barcode_view.set_message("The color barcode is not available for this segment")
+            self.brightness_view.set_message("The brightness barcode is not available for this segment")
+            self.barcode_status.setText("The analysis failed")
+
     def update_frame_label(self, index):
         seconds = index / self.info.fps if self.info.fps > 0 else 0.0
         self.frame_info.setText(
@@ -589,6 +1127,11 @@ class MainWindow(QMainWindow):
         if self.info is None:
             return
         self.wanted_index = index
+        self.barcode_view.set_position(index)
+        self.brightness_view.set_position(index)
+        self.motion_view.set_position(index)
+        self.segment_band.set_position(index)
+        self.shot_list.set_position(index)
         self.update_frame_label(index)       # update the text right away
         self.frame_timer.start()             # load the image once it settles
 
@@ -643,6 +1186,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Don't close the window while a background thread is still working
+        self.stop_barcode()
+        self.stop_shots()
+        self.stop_motion()
         for thread in self.findChildren(QThread):
             if thread.isRunning():
                 thread.wait()

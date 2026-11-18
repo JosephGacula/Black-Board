@@ -72,6 +72,47 @@ def read_frame(path, index):
     return next(read_segment(path, index, index))
 
 
-if __name__ == "__main__":
-    for frame in read_segment("samples/test1.mp4", 0, 4):
-        print(frame.index, round(frame.time, 3), frame.image.shape)
+# When the next wanted frame is farther away than this, jump straight to it
+# instead of decoding all the frames in between. A jump has to decode from the
+# nearest keyframe, so for close frames reading straight on is faster.
+SEEK_GAP = 90
+
+
+def read_frames(path, indices):
+    """Yield a Frame for each frame number in `indices`.
+
+    The numbers must be in increasing order. Frames are streamed one at a
+    time. Close frames are reached by reading on, far ones by jumping.
+    A number past the end of the video raises DecodeError only when the loop
+    gets to it, so the frames before it are still given.
+    Note: errors are raised when you start looping over the result.
+    """
+    indices = list(indices)
+    cap = _open(path)
+    try:
+        count, fps = _frame_count_and_fps(cap)
+        if any(index < 0 for index in indices):
+            raise DecodeError("Frame numbers must not be negative.")
+        for before, after in zip(indices, indices[1:]):
+            if after <= before:
+                raise DecodeError("Frame numbers must be in increasing order.")
+
+        position = None       # the number of the frame cap.read() gives next
+        for wanted in indices:
+            # Checked as we go, so frames before a bad number are still given
+            if wanted >= count:
+                raise DecodeError(f"Frame numbers must be between 0 and {count - 1}.")
+            if position is None or wanted - position > SEEK_GAP:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, wanted)
+                position = wanted
+            while position < wanted:
+                if not cap.grab():
+                    raise DecodeError(f"Could not read frame {position}.")
+                position += 1
+            ok, image = cap.read()
+            position += 1
+            if not ok:
+                raise DecodeError(f"Could not read frame {wanted}.")
+            yield Frame(index=wanted, time=wanted / fps, image=image)
+    finally:
+        cap.release()

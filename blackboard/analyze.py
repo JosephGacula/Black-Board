@@ -423,6 +423,20 @@ def chroma_vectorscope(image, size=VECTORSCOPE_SIZE):
     return counts.reshape(size, size)
 
 
+# ---------- average color ----------
+
+def average_color(image):
+    """The average color of the picture, as whole numbers (blue, green, red).
+
+    Black bars are cut off first, so they don't darken the result. This is
+    the color of one stripe of the barcode.
+    """
+    small = prepare(image)
+    picture = crop_bars(small, black_bar_lines(luma(small)))
+    mean = picture.reshape(-1, 3).mean(axis=0)
+    return tuple(int(round(value)) for value in mean)
+
+
 # ---------- color palette ----------
 #
 # The palette is the handful of colors that make up the picture, with how much

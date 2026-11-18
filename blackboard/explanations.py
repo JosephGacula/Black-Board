@@ -218,3 +218,89 @@ PALETTE_HELP = (
     "left out. A picture with only a few different colors shows fewer "
     "than five."
 )
+
+# Shown when hovering over the segment boxes and the band under the slider.
+SEGMENT_HELP = (
+    "Choose the stretch of the video to work on. Type frame numbers into "
+    "Start and End, or move the slider to a frame and press Use current. "
+    "The drop-down on the right switches the boxes between frame numbers "
+    "and times (minutes:seconds, such as 1:30.5); a time is rounded to the "
+    "nearest frame. The blue band under the slider shows the chosen stretch, and "
+    "the white tick shows the frame you are looking at. Analyses such as "
+    "the color barcode use only this segment. At first the whole video is "
+    "chosen."
+)
+
+# Shown when hovering over the color barcode and the button that builds it.
+BARCODE_HELP = (
+    "The chosen segment as one strip of color. Press Analyze to build it. "
+    "The segment is sampled at evenly spaced moments, and each stripe is "
+    "the average color of one moment, from the start of the segment on the "
+    "left to its end on the right. It shows at a glance how the colors and "
+    "the brightness change over time: a warm scene next to a cold one, a "
+    "long dark stretch, a change of location. The white line marks the "
+    "frame you are looking at, when it is inside the segment. Click or drag "
+    "on the strip to jump to that moment. Black bars around the picture are "
+    "left out."
+)
+
+# Shown when hovering over the brightness barcode.
+BRIGHTNESS_BARCODE_HELP = (
+    "The same stripes as the color barcode, but showing only how bright "
+    "each moment is: black for a dark moment, white for a bright one, grays "
+    "in between. It is built from the same analysis, so it appears with the "
+    "color barcode. Use it to see the rhythm of light and dark: a long "
+    "dark stretch, a sudden flash, a slow fade. The white line marks the "
+    "frame you are looking at. Click or drag on the strip to jump to that "
+    "moment. Black bars around the picture are left out."
+)
+
+# Shown when hovering over the shot list and the Detect shots button.
+SHOTS_HELP = (
+    "A shot is an unbroken run of film between two cuts. Press Detect "
+    "shots to find the cuts in the chosen segment: every frame is compared "
+    "with the one before it, and a sudden change of picture that stands out "
+    "from the frames around it is a cut. The table lists each shot with its "
+    "first and last frame and how long it lasts. Click a row to jump to "
+    "that shot. Under it are the average, median, shortest and longest shot, "
+    "and the cutting pace in cuts per minute. The yellow marks on the band "
+    "under the slider show where the cuts are. Only hard cuts are found: "
+    "a slow fade or dissolve changes the picture gradually, so it is not "
+    "counted, and neither is a cut on the very first frame of the segment. "
+    "Quick camera moves and flashes are not mistaken for cuts."
+)
+
+# Shown when hovering over the motion strip and the Analyze motion button.
+MOTION_HELP = (
+    "How much things move in the picture, over the chosen segment. Press "
+    "Analyze motion to measure it. At evenly spaced moments, a frame is "
+    "compared with the one after it, and the program follows how far every "
+    "part of the picture has moved (this is called optical flow). The "
+    "stripe's value is the average distance, as a share of the picture's "
+    "width and scaled to one second, so 10 means things cross a tenth of "
+    "the picture in a second. It does not depend on the frame rate or the "
+    "resolution. On the strip, dark purple is still, then blue, teal and "
+    "green, and yellow is fast (50 or more). Gray stripes fell on a cut, "
+    "where the picture is replaced and nothing can be followed, and they "
+    "are left out of the numbers. Washed-out stripes are rough estimates: "
+    "footage such as flames, smoke, water spray or flicker changes "
+    "completely from frame to frame, so the program cannot follow it "
+    "precisely, but it is still counted as lively. A camera move shows as motion everywhere, and so does a "
+    "moving subject. Black bars around the picture are left out. The line "
+    "under the strip gives the average and the busiest and calmest "
+    "moments. Click or drag on the strip to jump to that moment."
+)
+
+
+# Shown when hovering over the Check platforms button and in its window.
+PLATFORM_HELP = (
+    "Pick the places you would post this video, such as YouTube, Instagram "
+    "Reels or TikTok, and see how well it suits each one. Every place is "
+    "checked on its picture shape (aspect ratio), resolution, length, frame "
+    "rate, file size and file type. The most important is the shape: a "
+    "landscape video posted where a vertical one is expected shows as a thin "
+    "strip with black bars, and the card says how much of the screen the "
+    "picture would fill, or how much would be cropped away to fill it. "
+    "Green means fine, yellow means it works with a catch, red means a poor "
+    "fit. The limits come from the platforms' public guides and can change."
+)
