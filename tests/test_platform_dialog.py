@@ -249,13 +249,12 @@ def test_the_button_stays_usable_while_an_analysis_runs(app, tmp_path):
     window.motion_running = False
 
 
-def test_the_button_is_in_the_row_with_the_other_buttons(app):
+def test_the_button_is_in_the_video_details_card(app):
     window = MainWindow()
     window.resize(1000, 900)
     window.show()
     app.processEvents()
-    assert abs(window.platforms_button.y() - window.motion_button.y()) < 4
-    assert window.platforms_button.x() > window.motion_button.x()
+    assert window.details_card.isAncestorOf(window.platforms_button)
 
 
 # ---------- black bars found while the window is open ----------

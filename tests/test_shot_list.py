@@ -362,13 +362,13 @@ def test_opening_or_clearing_removes_the_cut_marks(app):
 
 def test_the_window_has_a_shot_list_under_the_video_details(app):
     window = MainWindow()
-    window.resize(1000, 860)
+    window.resize(1000, 900)
     window.show()
     app.processEvents()
     y = lambda widget: widget.mapTo(window, QPoint(0, 0)).y()
     last_field = window.fields["Audio length"]
     assert y(window.shot_list) > y(last_field)
-    assert window.shot_list.mapTo(window, QPoint(0, 0)).x() < window.preview.mapTo(window, QPoint(0, 0)).x()
+    assert window.shot_list.mapTo(window, QPoint(0, 0)).y() > window.preview.mapTo(window, QPoint(0, 0)).y()
     bottom = y(window.shot_list) + window.shot_list.height()
     assert bottom <= window.height()
 

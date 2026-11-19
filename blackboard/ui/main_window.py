@@ -1,4 +1,5 @@
 import colorsys
+import os
 import textwrap
 
 import cv2
@@ -28,10 +29,14 @@ from blackboard.ui.barcode_view import BarcodeView
 from blackboard.ui.histogram_view import HistogramView
 from blackboard.ui.palette_view import PaletteView
 from blackboard.ui.platform_dialog import PlatformDialog
-from blackboard.ui.segment_picker import SegmentBand, SegmentPicker
+from blackboard.ui.segment_picker import SegmentBand, SegmentPicker, format_time
 from blackboard.ui.shot_list import ShotListView
+from blackboard.ui.theme import MUTED
 from blackboard.ui.vectorscope_view import VectorscopeView
 from blackboard.ui.waveform_view import WaveformView
+from blackboard.ui.widgets import (
+    Card, ChevronButton, ClapperProgressBar, ElidedLabel, PreviewLabel, StepButton,
+)
 
 FIELD_NAMES = ["Codec", "Profile", "Resolution", "Frame rate", "Duration",
                "Frames", "Bitrate", "Pixel format", "Color space",
@@ -49,7 +54,12 @@ ANALYSIS_NAMES = ["Brightness", "Contrast", "Crushed blacks",
                   "Mid-tones", "Bright areas", "Dominant hue", "Black bars"]
 
 # The charts the drop-down above the chart area can show, in order
+SHOT_TABLE_HEIGHT = 150                # rows of the shot list, under the segment analysis
+LABEL_UNITS = ["Frames", "Time"]            # how the line under the slider names the position
+UNIT_FRAMES, UNIT_TIME = 0, 1
 SCOPE_NAMES = ["Luminance histogram", "Waveform", "Color palette", "Vectorscope"]
+ONE_VIEW_HEIGHT = 92                  # the least height of a chart shown alone; it grows to fill the card
+NO_LIMIT = 16777215                   # Qt's "no maximum size"
 
 # The panel fills this many rows, then starts a new column, so it never
 # grows taller however many measurements we add.
@@ -58,7 +68,19 @@ ANALYSIS_ROWS = 5
 # Side of the little square that shows the dominant hue, in pixels
 SWATCH_SIZE = 14
 
-PREVIEW_W, PREVIEW_H = 640, 360
+PREVIEW_W, PREVIEW_H = 1280, 720      # the most detail a preview frame is given
+WINDOW_W, WINDOW_H = 1290, 900
+WINDOW_MARGIN = 12
+LEFT_W = 540                 # width of the left column of cards
+CARD_INSET = 2 * 12 + 2      # a card's side padding and border
+CARD_GAP = 8
+
+# The video's facts are shown in two columns: the video's and the audio's
+AUDIO_FIELD_NAMES = ["Audio", "Audio tracks"] + AUDIO_DETAIL_FIELDS
+
+# What the preview says when there is no video
+EMPTY_PREVIEW_TEXT = "Open a video, or drop one here"
+VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".avi")
 
 # Text of the button that starts the color barcode analysis, and of the same
 # button while the analysis runs
@@ -161,6 +183,13 @@ def last_frame_index(info):
     if info.duration > 0 and info.fps > 0:
         return max(int(round(info.duration * info.fps)) - 1, 0)
     return None
+
+
+def heading(text):
+    """A small bold caption above a group of values."""
+    label = QLabel(text)
+    label.setStyleSheet(f"font-weight: bold; color: {MUTED};")
+    return label
 
 
 def shrink_for_preview(image):
@@ -364,7 +393,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Black Board")
-        self.resize(1000, 900)
+        self.resize(WINDOW_W, WINDOW_H)
+        self.setAcceptDrops(True)            # a video can be dropped on the window
 
         self.probe_thread = None
         self.frame_thread = None
@@ -392,37 +422,40 @@ class MainWindow(QMainWindow):
         self.frame_timer.timeout.connect(self.request_frame)
 
         # --- Top: open button, file name, progress bar ---
-        self.open_button = QPushButton("Open video...")
+        self.open_button = ChevronButton("Open video...", first=True, primary=True, compact=True)
+        self.open_button.setToolTip("Choose a video file, or drop one on the window")
         self.open_button.clicked.connect(self.choose_file)
 
-        self.file_label = QLabel("No video selected")
-        self.file_label.setWordWrap(True)
+        self.file_label = ElidedLabel("No video selected")
+        self.file_label.setStyleSheet(f"color: {MUTED};")
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setVisible(False)
-        # Keep its space reserved so the layout doesn't jump when it appears
-        policy = self.progress_bar.sizePolicy()
-        policy.setRetainSizeWhenHidden(True)
-        self.progress_bar.setSizePolicy(policy)
+        self.progress_bar = ClapperProgressBar()      # always there, dark until a step runs
 
         # --- Left: one label per measurement ---
         self.fields = {}
-        form = QFormLayout()
+        video_form = QGridLayout()
+        audio_form = QGridLayout()
+        for form in (video_form, audio_form):
+            form.setHorizontalSpacing(10)
+            form.setVerticalSpacing(3)
+            form.setColumnStretch(2, 1)         # spare width goes to the right
         for name in FIELD_NAMES:
             # Hovering over either the name or the value shows an explanation
             tip = textwrap.fill(FIELD_HELP[name], width=55)
             name_label = QLabel(name + ":")
             name_label.setToolTip(tip)
+            name_label.setStyleSheet(f"color: {MUTED};")
             value_label = QLabel("-")
             value_label.setToolTip(tip)
             self.fields[name] = value_label
-            form.addRow(name_label, value_label)
+            form = audio_form if name in AUDIO_FIELD_NAMES else video_form
+            row = sum(1 for other in self.fields if (other in AUDIO_FIELD_NAMES)
+                      == (name in AUDIO_FIELD_NAMES)) - 1     # this field's row in its column
+            form.addWidget(name_label, row, 0)
+            form.addWidget(value_label, row, 1)
 
         # --- Right: frame preview with slider and number box ---
-        self.preview = QLabel()
-        self.preview.setFixedSize(PREVIEW_W, PREVIEW_H)
-        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview = PreviewLabel()
         self.preview.setStyleSheet("background-color: #111; color: #aaa;")
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -437,21 +470,21 @@ class MainWindow(QMainWindow):
         segment_tip = textwrap.fill(SEGMENT_HELP, width=55)
         self.segment_band = SegmentBand()
         self.segment_band.setToolTip(segment_tip)
-        self.segment_picker = SegmentPicker()
+        self.segment_picker = SegmentPicker(show_both=True)
         self.segment_picker.setToolTip(segment_tip)
         self.segment_picker.changed.connect(self.segment_band.set_segment)
         self.segment_picker.start_from_current.connect(self.use_current_as_start)
         self.segment_picker.end_from_current.connect(self.use_current_as_end)
 
         # Analyzing the segment's colors is a separate step the user starts
-        self.analyze_button = QPushButton(ANALYZE_TEXT)
+        self.analyze_button = StepButton(ANALYZE_TEXT)
         self.analyze_button.setToolTip(textwrap.fill(BARCODE_HELP, width=55))
         self.analyze_button.clicked.connect(self.on_analyze_clicked)
         self.barcode_status = QLabel("")
 
         # Measuring the motion of the segment is a third step
         motion_tip = textwrap.fill(MOTION_HELP, width=55)
-        self.motion_button = QPushButton(MOTION_TEXT)
+        self.motion_button = StepButton(MOTION_TEXT)
         self.motion_button.setToolTip(motion_tip)
         self.motion_button.clicked.connect(self.on_motion_clicked)
         self.motion_view = BarcodeView()
@@ -460,24 +493,25 @@ class MainWindow(QMainWindow):
         self.motion_status = QLabel("")
         self.motion_status.setWordWrap(True)      # the line can be long
         self.motion_status.setMinimumWidth(100)
+        # two lines of text: a fixed height keeps the layout from re-fitting as the text changes
+        self.motion_status.setFixedHeight(2 * self.motion_status.fontMetrics().lineSpacing() + 2)
         self.motion_status.setToolTip(motion_tip)
 
         # Checking how well the video suits the places it will be posted. This
         # only reads the file's facts, so it is instant and never blocks anything.
         platform_tip = textwrap.fill(PLATFORM_HELP, width=55)
-        self.platforms_button = QPushButton(PLATFORMS_TEXT)
+        self.platforms_button = StepButton(PLATFORMS_TEXT)
         self.platforms_button.setToolTip(platform_tip)
         self.platforms_button.clicked.connect(self.on_platforms_clicked)
 
         # Finding the shots (cuts) of the segment is another step the user starts
         shots_tip = textwrap.fill(SHOTS_HELP, width=55)
-        self.shots_button = QPushButton(SHOTS_TEXT)
+        self.shots_button = StepButton(SHOTS_TEXT)
         self.shots_button.setToolTip(shots_tip)
         self.shots_button.clicked.connect(self.on_shots_clicked)
-        self.shots_title = QLabel("Shots")
-        self.shots_title.setStyleSheet("font-weight: bold;")
+        self.shots_title = QLabel("Shot list")
         self.shots_title.setToolTip(shots_tip)
-        self.shot_list = ShotListView()
+        self.shot_list = ShotListView(width=None, beside=True, height=SHOT_TABLE_HEIGHT)
         self.shot_list.setToolTip(shots_tip)
         self.shot_list.seek_requested.connect(self.frame_spin.setValue)
 
@@ -492,6 +526,11 @@ class MainWindow(QMainWindow):
         self.brightness_view.seek_requested.connect(self.frame_spin.setValue)
 
         self.frame_info = QLabel("")
+        # The line under the slider can name the position in frames or in time
+        self.label_unit = QComboBox()
+        self.label_unit.addItems(LABEL_UNITS)
+        self.label_unit.setToolTip("Show the position under the slider as a frame number or as a time.")
+        self.label_unit.currentIndexChanged.connect(self.on_label_unit_changed)
 
         # Optional exposure warnings painted on the preview
         self.exposure_check = QCheckBox("Show exposure warnings")
@@ -507,7 +546,6 @@ class MainWindow(QMainWindow):
 
         # --- Right, under the preview: measurements for the current frame ---
         self.analysis_title = QLabel("Frame analysis")
-        self.analysis_title.setStyleSheet("font-weight: bold;")
         self.analysis_fields = {}
         self.analysis_grid = QGridLayout()
         self.analysis_grid.setHorizontalSpacing(10)
@@ -524,6 +562,7 @@ class MainWindow(QMainWindow):
             tip = textwrap.fill(ANALYSIS_HELP[name], width=55)
             name_label = QLabel(name + ":")
             name_label.setToolTip(tip)
+            name_label.setStyleSheet(f"color: {MUTED};")
             value_label = QLabel("-")
             value_label.setToolTip(tip)
             self.analysis_fields[name] = value_label
@@ -565,40 +604,85 @@ class MainWindow(QMainWindow):
         self.vectorscope_view = VectorscopeView()
         self.vectorscope_view.setToolTip(vectorscope_tip)
 
-        # One chart area, with a drop-down above it to pick which chart
+        # One chart area, with a drop-down above it to pick which chart. The chart
+        # is as big as the card around it allows.
+        self.chart_views = [self.histogram_view, self.waveform_view, self.palette_view,
+                            self.vectorscope_view]
         self.scope_stack = QStackedWidget()
-        self.scope_stack.addWidget(self.histogram_view)
-        self.scope_stack.addWidget(self.waveform_view)
-        self.scope_stack.addWidget(self.palette_view)
-        self.scope_stack.addWidget(self.vectorscope_view)
-        self.scope_stack.setFixedHeight(self.histogram_view.height())
+        self.scope_stack.setMinimumHeight(ONE_VIEW_HEIGHT)
+        for view in self.chart_views:
+            view.setMinimumHeight(ONE_VIEW_HEIGHT)
+            view.setMaximumHeight(NO_LIMIT)
+            self.scope_stack.addWidget(view)
+        self.scope_tips = [histogram_tip, waveform_tip, palette_tip_text, vectorscope_tip]
         self.scope_selector = QComboBox()
         self.scope_selector.addItems(SCOPE_NAMES)
         self.scope_selector.setStyleSheet("font-weight: bold;")
-        self.scope_tips = [histogram_tip, waveform_tip, palette_tip_text,
-                           vectorscope_tip]
         for position, tip in enumerate(self.scope_tips):
             self.scope_selector.setItemData(position, tip, Qt.ItemDataRole.ToolTipRole)
         self.scope_selector.setToolTip(histogram_tip)
         self.scope_selector.currentIndexChanged.connect(self.on_scope_changed)
 
-        numbers_column = QVBoxLayout()
-        numbers_column.addWidget(self.analysis_title)
-        numbers_column.addLayout(self.analysis_grid)
-        numbers_column.addStretch()
-
-        histogram_column = QVBoxLayout()
-        histogram_column.addWidget(self.scope_selector)
-        histogram_column.addWidget(self.scope_stack)
-        histogram_column.addStretch()
-
-        analysis_row = QHBoxLayout()
-        analysis_row.addLayout(numbers_column)
-        analysis_row.addSpacing(16)
-        analysis_row.addLayout(histogram_column, 1)
-
         self.clear_preview()
 
+        # ---- the arrow-shaped buttons along the top: the steps, left to right ----
+        steps = QGridLayout()
+        steps.setHorizontalSpacing(10)
+        steps.setVerticalSpacing(2)
+        steps.setContentsMargins(0, 0, 0, 0)
+        steps.addWidget(self.open_button, 0, 0)
+        steps.addWidget(self.progress_bar, 0, 1)      # the clapper arm, right after Open, to the window's edge
+        steps.addWidget(self.file_label, 1, 1)        # the video's path, just below the bar
+        steps.setColumnStretch(1, 1)
+
+        # ---- left column: facts about the video, this frame, and the shots ----
+        video_column = QVBoxLayout()
+        video_column.setSpacing(6)
+        video_column.setContentsMargins(0, 0, 0, 0)
+        video_column.addWidget(heading("Video"))
+        video_column.addLayout(video_form)
+        video_column.addStretch(1)
+        audio_column = QVBoxLayout()
+        audio_column.setSpacing(6)
+        audio_column.setContentsMargins(0, 0, 0, 0)
+        audio_column.addWidget(heading("Audio"))
+        audio_column.addLayout(audio_form)
+        audio_column.addStretch(1)
+        columns = QHBoxLayout()
+        columns.setSpacing(24)
+        columns.addLayout(video_column, 1)
+        columns.addLayout(audio_column, 1)
+        self.details_card = Card("Metadata")
+        self.details_card.add_to_header(self.platforms_button)
+        self.details_card.body.addLayout(columns)
+
+        self.analysis_card = Card("Frame analysis")
+        self.analysis_title = self.analysis_card.title_label
+        self.analysis_card.add_to_header(self.exposure_legend)
+        self.analysis_card.add_to_header(self.exposure_check)
+        self.analysis_card.body.addLayout(self.analysis_grid)
+
+        self.shots_card = Card("Shot list")
+        self.shots_title = self.shots_card.title_label
+        self.shots_title.setToolTip(shots_tip)
+        self.shots_card.add_to_header(self.shots_button)
+        self.shots_card.body.addWidget(self.shot_list)
+
+        self.views_card = Card("Views")
+        self.views_card.add_to_header(self.scope_selector)
+        self.views_card.body.addWidget(self.scope_stack)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(CARD_GAP)
+        left_column.addWidget(self.details_card)
+        left_column.addWidget(self.analysis_card)
+        left_column.addWidget(self.views_card, 1)          # the chart takes the rest of the column
+        left_panel = QWidget()
+        left_panel.setLayout(left_column)
+        left_panel.setFixedWidth(LEFT_W)
+
+        # ---- right column: the frame, the segment, and what was measured ----
         # The band sits right under the slider and is as wide as it is
         slider_grid = QGridLayout()
         slider_grid.setVerticalSpacing(2)
@@ -606,53 +690,61 @@ class MainWindow(QMainWindow):
         slider_grid.addWidget(self.frame_spin, 0, 1)
         slider_grid.addWidget(self.segment_band, 1, 0)
 
-        analyze_row = QHBoxLayout()
-        analyze_row.addWidget(self.analyze_button)
-        analyze_row.addWidget(self.shots_button)
-        analyze_row.addWidget(self.motion_button)
-        analyze_row.addWidget(self.platforms_button)
-        analyze_row.addWidget(self.barcode_status, 1)
-
-        preview_column = QVBoxLayout()
-        preview_column.addWidget(self.preview)
-        preview_column.addLayout(slider_grid)
-        preview_column.addWidget(self.segment_picker)
-        preview_column.addLayout(analyze_row)
-        preview_column.addWidget(self.barcode_view)
-        preview_column.addWidget(self.brightness_view)
-        preview_column.addWidget(self.motion_view)
-        preview_column.addWidget(self.motion_status)
+        self.frame_info.setStyleSheet(f"color: {MUTED};")
         info_row = QHBoxLayout()
-        info_row.addWidget(self.frame_info)
-        info_row.addStretch()
-        info_row.addWidget(self.exposure_legend)
-        info_row.addWidget(self.exposure_check)
-        preview_column.addLayout(info_row)
-        preview_column.addSpacing(8)
-        preview_column.addLayout(analysis_row)
-        preview_column.addStretch()
+        info_row.addWidget(self.frame_info, 1)
+        info_row.addWidget(self.label_unit)
+        self.preview_card = Card()
+        self.preview_card.body.addWidget(self.preview, 1)       # the picture takes the spare room
+        self.preview_card.body.addLayout(slider_grid)
+        self.preview_card.body.addWidget(self.segment_picker)
+        self.preview_card.body.addLayout(info_row)
 
-        # The shot list sits on the left, under the video's technical details
-        left_column = QVBoxLayout()
-        left_column.addLayout(form)
-        left_column.addSpacing(12)
-        left_column.addWidget(self.shots_title)
-        left_column.addWidget(self.shot_list)
-        left_column.addStretch()
+        # One row per measurement of the segment: its name and its strip
+        self.strips_card = Card("Segment analysis")
+        self.barcode_status.setStyleSheet(f"color: {MUTED};")
+        self.strips_card.add_to_header(self.barcode_status)
+        strips = QGridLayout()
+        strips.setHorizontalSpacing(10)
+        strips.setVerticalSpacing(6)
+        for row, (name, tip, strip) in enumerate((
+                ("Color", BARCODE_HELP, self.barcode_view),
+                ("Brightness", BRIGHTNESS_BARCODE_HELP, self.brightness_view),
+                ("Motion", MOTION_HELP, self.motion_view))):
+            label = QLabel(name)
+            label.setToolTip(textwrap.fill(tip, width=55))
+            label.setStyleSheet(f"color: {MUTED};")
+            strips.addWidget(label, row, 0)
+            strips.addWidget(strip, row, 1)
+        strips.addWidget(self.analyze_button, 0, 2)       # each button sits by its own strip
+        strips.addWidget(self.motion_button, 2, 2)
+        strips.addWidget(self.motion_status, 3, 1)
+        strips.setColumnStretch(1, 1)
+        self.strips_card.body.addLayout(strips)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(CARD_GAP)
+        right_column.addWidget(self.preview_card, 1)       # the picture takes the rest of the column
+        right_column.addWidget(self.strips_card)
+        right_column.addWidget(self.shots_card)
 
         body = QHBoxLayout()
-        body.addLayout(left_column)
-        body.addLayout(preview_column)
+        body.setSpacing(CARD_GAP)
+        body.addWidget(left_panel, 0)
+        body.addLayout(right_column, 1)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.open_button)
-        layout.addWidget(self.file_label)
-        layout.addWidget(self.progress_bar)
-        layout.addLayout(body)
+        layout.setContentsMargins(WINDOW_MARGIN, WINDOW_MARGIN, WINDOW_MARGIN, WINDOW_MARGIN)
+        layout.setSpacing(CARD_GAP)
+        layout.addLayout(steps)
+        layout.addLayout(body, 1)
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+        # Open at the usual size, or larger if this computer's fonts need more room
+        hint = self.minimumSizeHint()
+        self.resize(max(WINDOW_W, hint.width()), max(WINDOW_H, hint.height()))
 
     # ---------- opening a video and probing it ----------
 
@@ -663,7 +755,10 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return  # the user cancelled
+        self.open_path(path)
 
+    def open_path(self, path):
+        """Start reading this video file (chosen in the dialog or dropped)."""
         self.current_path = path
         self.clear_info()
         self.clear_preview()
@@ -671,13 +766,35 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(False)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
 
         self.probe_thread = ProbeThread(path, self)
         self.probe_thread.progress.connect(self.on_progress)
         self.probe_thread.done.connect(self.on_done)
         self.probe_thread.failed.connect(self.on_failed)
         self.probe_thread.start()
+
+    # ---------- dropping a video on the window ----------
+
+    @staticmethod
+    def dropped_video(mime):
+        """The path of the first video file in what is being dragged, or None."""
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            path = url.toLocalFile()
+            if path and path.lower().endswith(VIDEO_SUFFIXES):
+                return path
+        return None
+
+    def dragEnterEvent(self, event):
+        if self.open_button.isEnabled() and self.dropped_video(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self.dropped_video(event.mimeData())
+        if path and self.open_button.isEnabled():
+            event.acceptProposedAction()
+            self.open_path(os.path.normpath(path))       # Windows paths use backslashes
 
     def on_progress(self, percent):
         if percent < 0:
@@ -698,7 +815,8 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Could not open video", message)
 
     def end_probe(self):
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         self.open_button.setEnabled(True)
 
     def clear_info(self):
@@ -744,11 +862,12 @@ class MainWindow(QMainWindow):
         self.frame_slider.setEnabled(False)
         self.frame_spin.setEnabled(False)
         self.preview.clear()
-        self.preview.setText("Open a video to see its frames")
+        self.preview.setText(EMPTY_PREVIEW_TEXT)
         self.frame_info.setText("")
         self.normal_picture = None
         self.warning_picture = None
         self.exposure_check.setEnabled(False)
+        self.label_unit.setEnabled(False)
         self.exposure_legend.hide()
         self.stop_barcode()
         self.segment_picker.clear()
@@ -835,6 +954,11 @@ class MainWindow(QMainWindow):
         self.frame_slider.setEnabled(True)
         self.frame_spin.setEnabled(True)
         self.exposure_check.setEnabled(True)
+        self.label_unit.setEnabled(True)
+        has_time = info.fps > 0                  # without a frame rate there is no time to show
+        self.label_unit.model().item(UNIT_TIME).setEnabled(has_time)
+        if not has_time:
+            self.label_unit.setCurrentIndex(UNIT_FRAMES)
         self.update_frame_label(0)
         self.preview.setText("Loading frame...")
         self.request_frame()
@@ -927,6 +1051,9 @@ class MainWindow(QMainWindow):
         self.analyze_button.setText(CANCEL_TEXT if self.barcode_running else ANALYZE_TEXT)
         self.shots_button.setText(CANCEL_TEXT if self.shots_running else SHOTS_TEXT)
         self.motion_button.setText(CANCEL_TEXT if self.motion_running else MOTION_TEXT)
+        self.analyze_button.set_busy(self.barcode_running)
+        self.shots_button.set_busy(self.shots_running)
+        self.motion_button.set_busy(self.motion_running)
 
     # ---------- how well the video suits the places it will be posted ----------
 
@@ -1118,10 +1245,18 @@ class MainWindow(QMainWindow):
             self.barcode_status.setText("The analysis failed")
 
     def update_frame_label(self, index):
-        seconds = index / self.info.fps if self.info.fps > 0 else 0.0
-        self.frame_info.setText(
-            f"Frame {index} of {self.frame_slider.maximum()}   |   {seconds:.2f} s"
-        )
+        last = self.frame_slider.maximum()
+        fps = self.info.fps if self.info is not None else 0.0
+        if self.label_unit.currentIndex() == UNIT_TIME and fps > 0:
+            self.frame_info.setText(
+                f"{format_time(index / fps)} of {format_time(last / fps)}   |   frame {index}")
+        else:
+            seconds = index / fps if fps > 0 else 0.0
+            self.frame_info.setText(f"Frame {index} of {last}   |   {seconds:.2f} s")
+
+    def on_label_unit_changed(self, position):
+        if self.info is not None:
+            self.update_frame_label(self.frame_slider.value())
 
     def on_frame_changed(self, index):
         if self.info is None:

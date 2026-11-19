@@ -255,6 +255,7 @@ def test_picking_the_vectorscope_shows_it(app):
 
 def test_every_frame_updates_the_vectorscope_even_when_it_is_hidden(app):
     window = MainWindow()
+    window.scope_selector.setCurrentIndex(0)
     counts = chroma_vectorscope(solid(0, 0, 255))
     window.show_analysis(stats_with_vectorscope(counts))
     assert (window.vectorscope_view.counts == counts).all()

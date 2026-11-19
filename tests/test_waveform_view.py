@@ -216,6 +216,7 @@ def stats_with_waveform(waveform):
 def test_the_histogram_is_shown_first(app):
     window = MainWindow()
     assert [window.scope_selector.itemText(i) for i in range(window.scope_selector.count())] == SCOPE_NAMES
+    assert SCOPE_NAMES[0] == "Luminance histogram"
     assert window.scope_selector.currentIndex() == 0
     assert window.scope_stack.currentWidget() is window.histogram_view
 
@@ -283,4 +284,11 @@ def test_each_chart_has_an_explanation(app):
 
 def test_the_chart_area_keeps_the_same_height_for_both_charts(app):
     window = MainWindow()
-    assert window.scope_stack.height() == window.histogram_view.height() == window.waveform_view.height()
+    window.show()
+    window.scope_selector.setCurrentIndex(0)
+    app.processEvents()
+    assert window.scope_stack.height() == window.histogram_view.height()
+    window.scope_selector.setCurrentIndex(1)
+    app.processEvents()
+    assert window.scope_stack.height() == window.waveform_view.height()
+    assert window.waveform_view.height() > 92          # it grows with the card

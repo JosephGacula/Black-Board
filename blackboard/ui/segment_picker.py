@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 BAND_BACKGROUND = QColor("#2a2a2a")
-BAND_SEGMENT = QColor("#3d8bfd")
+BAND_SEGMENT = QColor("#a8a8ae")
 BAND_MARKER = QColor("#ffffff")
 BAND_CUT = QColor("#ffcc00")
 BAND_HEIGHT = 8
@@ -151,15 +151,19 @@ class SegmentBand(QWidget):
 class SegmentPicker(QWidget):
     """Start and end boxes, each with a button that takes the frame being
     looked at. The start never goes past the end. The boxes can be read and
-    typed in frames or in time (m:ss.cc); the frames are what is kept."""
+    typed in frames or in time (m:ss.cc); the frames are what is kept.
+
+    With show_both=True the frame boxes and the time boxes are all shown at
+    once, in one row, and there is no drop-down."""
 
     changed = Signal(int, object)           # first, last (a person edited them)
     start_from_current = Signal()           # the "Use current frame" buttons
     end_from_current = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_both=False):
         super().__init__(parent)
         self.fps = 0.0
+        self.show_both = show_both
 
         self.start_spin = QSpinBox()
         self.end_spin = QSpinBox()
@@ -183,6 +187,16 @@ class SegmentPicker(QWidget):
         self.end_time.valueChanged.connect(lambda seconds: self.on_time_edited(False, seconds))
         self.unit_combo.currentIndexChanged.connect(self.show_unit)
 
+        if show_both:
+            self.build_grid()
+        else:
+            self.build_row()
+
+        self.clear()
+        self.show_unit()
+
+    def build_row(self):
+        """Everything in one row, with the Frames / Time drop-down at the end."""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Start:"))
@@ -199,8 +213,23 @@ class SegmentPicker(QWidget):
         layout.addStretch()
         layout.addWidget(self.unit_combo)
 
-        self.clear()
-        self.show_unit()
+    def build_grid(self):
+        """Start and end side by side, each with its frame and time boxes, and
+        no Frames / Time drop-down."""
+        self.unit_combo.hide()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        for name, spin, time_box, button in (
+                ("Start", self.start_spin, self.start_time, self.start_button),
+                ("End", self.end_spin, self.end_time, self.end_button)):
+            layout.addWidget(QLabel(name))
+            layout.addWidget(spin)
+            layout.addWidget(time_box)
+            layout.addWidget(button)
+            layout.addSpacing(10)
+        layout.addStretch(1)
+        layout.addWidget(self.length_label)
 
     # ---------- setting it up ----------
 
@@ -287,6 +316,10 @@ class SegmentPicker(QWidget):
         return self.unit_combo.currentIndex()
 
     def show_unit(self, _index=None):
+        if self.show_both:
+            for box in (self.start_spin, self.end_spin, self.start_time, self.end_time):
+                box.setVisible(True)
+            return
         in_time = self.unit() == UNIT_TIME
         self.start_spin.setVisible(not in_time)
         self.end_spin.setVisible(not in_time)
@@ -296,6 +329,8 @@ class SegmentPicker(QWidget):
     def update_unit_choice(self):
         """Times need a frame rate. Without one only frames can be used."""
         has_rate = self.fps > 0
+        self.start_time.setEnabled(has_rate or not self.show_both)
+        self.end_time.setEnabled(has_rate or not self.show_both)
         self.unit_combo.setEnabled(has_rate)
         if not has_rate:
             self.unit_combo.setCurrentIndex(UNIT_FRAMES)

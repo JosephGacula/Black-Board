@@ -371,8 +371,10 @@ def test_the_barcode_sits_below_the_segment_controls(app):
     app.processEvents()
     y = lambda widget: widget.mapTo(window, QPoint(0, 0)).y()
     assert y(window.segment_picker) > y(window.frame_slider)
-    assert y(window.analyze_button) > y(window.segment_picker)
-    assert y(window.barcode_view) > y(window.analyze_button)
+    assert y(window.barcode_view) > y(window.segment_picker)
+    # the button that starts the analysis is in the same card, beside its strip
+    assert window.strips_card.isAncestorOf(window.analyze_button)
+    assert abs(y(window.analyze_button) - y(window.barcode_view)) < 20
 
 
 def test_everything_fits_in_the_window(app):

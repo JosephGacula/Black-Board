@@ -4,12 +4,14 @@ from bisect import bisect_right
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 COLUMNS = ["Shot", "Start", "End", "Length"]
 LIST_WIDTH = 250
 LIST_HEIGHT = 190
+SUMMARY_WIDTH = 240                  # the numbers beside the table
+GROW_MIN_HEIGHT = 60                # the least a growing table is given
 
 
 def seconds_text(seconds):
@@ -34,7 +36,7 @@ class ShotListView(QWidget):
 
     seek_requested = Signal(int)            # a frame number
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, width=LIST_WIDTH, grow=False, beside=False, height=LIST_HEIGHT):
         super().__init__(parent)
         self.starts = []                    # first frame of every shot
 
@@ -45,17 +47,39 @@ class ShotListView(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setFixedSize(LIST_WIDTH, LIST_HEIGHT)
+        if width is not None:               # None: as wide as the space it is given
+            self.table.setFixedWidth(width)
+        if grow:                            # take whatever height the column has left
+            self.table.setMinimumHeight(GROW_MIN_HEIGHT)
+        else:
+            self.table.setFixedHeight(height)
         self.table.cellClicked.connect(self.on_row_clicked)
 
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
-        self.summary.setFixedWidth(LIST_WIDTH)
+        if width is not None:
+            self.summary.setFixedWidth(width)
+        else:                               # no wrapping: a label that wraps makes the
+            self.summary.setWordWrap(False)  # layout around it unsteady about its height
+            self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.table)
-        layout.addWidget(self.summary)
+        if beside:                          # the numbers sit to the right of the table
+            self.summary.setWordWrap(False)
+            self.summary.setFixedWidth(SUMMARY_WIDTH)
+            self.summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self.summary.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Ignored)
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+            layout.addWidget(self.table, 1)
+            layout.addWidget(self.summary)
+        else:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.table, 1 if grow else 0)
+            layout.addWidget(self.summary)
+            if not grow:
+                layout.addStretch(1)       # the text stays right under the table
 
     # ---------- what to show ----------
 

@@ -157,6 +157,7 @@ def test_picking_the_palette_shows_it(app):
 
 def test_every_frame_updates_the_palette_even_when_it_is_hidden(app):
     window = MainWindow()
+    window.scope_selector.setCurrentIndex(0)
     window.show_analysis(stats_with_palette([RED, GREEN]))
     assert window.palette_view.colors == [RED, GREEN]
     assert window.scope_stack.currentWidget() is window.histogram_view
@@ -195,9 +196,15 @@ def test_the_drop_down_tooltip_matches_the_chart_picked(app):
     assert window.scope_selector.toolTip() == window.histogram_view.toolTip()
 
 
-def test_all_four_charts_are_the_same_height(app):
+def test_all_four_charts_get_the_same_height(app):
     window = MainWindow()
-    heights = {window.scope_stack.height(), window.histogram_view.height(),
-               window.waveform_view.height(), window.palette_view.height(),
-               window.vectorscope_view.height()}
-    assert len(heights) == 1
+    window.show()
+    seen = set()
+    for position, view in enumerate((window.histogram_view, window.waveform_view,
+                                     window.palette_view, window.vectorscope_view)):
+        window.scope_selector.setCurrentIndex(position)
+        app.processEvents()
+        assert window.scope_stack.currentWidget() is view
+        assert view.height() == window.scope_stack.height()
+        seen.add(view.height())
+    assert len(seen) == 1                      # each is as tall as the chart area
